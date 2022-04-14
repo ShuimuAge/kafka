@@ -19,11 +19,11 @@ package kafka.admin
 
 import java.util.concurrent.TimeUnit
 import java.util.{Collections, Properties}
-
 import joptsimple._
 import kafka.common.Config
 import kafka.log.LogConfig
 import kafka.server.{ConfigEntityName, ConfigType, Defaults, DynamicBrokerConfig, DynamicConfig, KafkaConfig}
+import kafka.ssy.datachannel.HAClusterConfig
 import kafka.utils.{CommandDefaultOptions, CommandLineUtils, Exit, PasswordEncoder}
 import kafka.utils.Implicits._
 import kafka.zk.{AdminZkClient, KafkaZkClient}
@@ -79,7 +79,7 @@ object ConfigCommand extends Config {
     try {
       val opts = new ConfigCommandOptions(args)
 
-      CommandLineUtils.printHelpAndExitIfNeeded(opts, "This tool helps to manipulate and describe entity config for a topic, client, user or broker")
+      CommandLineUtils.printHelpAndExitIfNeeded(opts, "This tool helps to manipulate and describe entity config for a topic, client, user, cluster or broker")
 
       opts.checkArgs()
 
@@ -157,6 +157,11 @@ object ConfigCommand extends Config {
     val invalidConfigs = configsToBeDeleted.filterNot(configs.containsKey(_))
     if (invalidConfigs.nonEmpty)
       throw new InvalidConfigurationException(s"Invalid config(s): ${invalidConfigs.mkString(",")}")
+
+    //TODO 这个地方有点逻辑问题，改了一处
+    //存在Topic或User对某集群的依赖时不能删除该集群配置
+    if (entityType == ConfigType.HACluster && configsToBeDeleted.nonEmpty)
+      adminZkClient.validClusterConfigsDeletable(entityName)
 
     configs ++= configsToBeAdded
     configsToBeDeleted.foreach(configs.remove(_))
@@ -562,10 +567,10 @@ object ConfigCommand extends Config {
     val describeOpt = parser.accepts("describe", "List configs for the given entity.")
     val allOpt = parser.accepts("all", "List all configs for the given entity (includes static configuration when the entity type is brokers)")
 
-    val entityType = parser.accepts("entity-type", "Type of entity (topics/clients/users/brokers/broker-loggers)")
+    val entityType = parser.accepts("entity-type", "Type of entity (topics/clients/users/brokers/ha-clusters/broker-loggers)")
             .withRequiredArg
             .ofType(classOf[String])
-    val entityName = parser.accepts("entity-name", "Name of entity (topic name/client id/user principal name/broker id)")
+    val entityName = parser.accepts("entity-name", "Name of entity (topic name/client id/user principal name/ha-cluster id/broker id)")
             .withRequiredArg
             .ofType(classOf[String])
     val entityDefault = parser.accepts("entity-default", "Default entity name for clients/users/brokers (applies to corresponding entity type in command line)")
@@ -576,6 +581,7 @@ object ConfigCommand extends Config {
             "For entity-type '" + ConfigType.Broker + "': " + DynamicConfig.Broker.names.asScala.toSeq.sorted.map("\t" + _).mkString(nl, nl, nl) +
             "For entity-type '" + ConfigType.User + "': " + DynamicConfig.User.names.asScala.toSeq.sorted.map("\t" + _).mkString(nl, nl, nl) +
             "For entity-type '" + ConfigType.Client + "': " + DynamicConfig.Client.names.asScala.toSeq.sorted.map("\t" + _).mkString(nl, nl, nl) +
+            "For entity-type '" + ConfigType.HACluster + "': " + HAClusterConfig.configDef.names.asScala.toSeq.sorted.map("\t" + _).mkString(nl, nl, nl) +
             s"Entity types '${ConfigType.User}' and '${ConfigType.Client}' may be specified together to update config for clients of a specific user.")
             .withRequiredArg
             .ofType(classOf[String])

@@ -222,6 +222,10 @@ class FailedPartitions {
   def contains(topicPartition: TopicPartition): Boolean = synchronized {
     failedPartitionsSet.contains(topicPartition)
   }
+
+  def listAll(): Set[TopicPartition] = {
+    failedPartitionsSet.toSet
+  }
 }
 
 case class BrokerAndFetcherId(broker: BrokerEndPoint, fetcherId: Int)

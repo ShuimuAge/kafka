@@ -18,6 +18,7 @@
 package kafka.server
 
 import java.util.Properties
+import org.apache.kafka.common.config.manager.UserConfigManager
 
 import kafka.log.LogConfig
 import kafka.security.CredentialProvider
@@ -95,16 +96,23 @@ object DynamicConfig {
   }
 
   object User {
+    //DidiHA Properties
+    val DidiHAActiveClusterProp = UserConfigManager.DidiHAActiveClusterProp
+    //Documentation
+    val DidiHAActiveClusterPropDoc = "A cluster to be bound by user's AuthId."
 
     //Definitions
     private val userConfigs = CredentialProvider.userCredentialConfigs
       .define(Client.ProducerByteRateOverrideProp, LONG, Client.DefaultProducerOverride, MEDIUM, Client.ProducerOverrideDoc)
       .define(Client.ConsumerByteRateOverrideProp, LONG, Client.DefaultConsumerOverride, MEDIUM, Client.ConsumerOverrideDoc)
       .define(Client.RequestPercentageOverrideProp, DOUBLE, Client.DefaultRequestOverride, MEDIUM, Client.RequestOverrideDoc)
+      .define(DidiHAActiveClusterProp, STRING, null, MEDIUM, DidiHAActiveClusterProp)
 
     def names = userConfigs.names
 
     def validate(props: Properties) = DynamicConfig.validate(userConfigs, props, customPropsAllowed = false)
+
+    def getConfigs() = userConfigs
   }
 
   private def validate(configDef: ConfigDef, props: Properties, customPropsAllowed: Boolean) = {
@@ -119,4 +127,6 @@ object DynamicConfig {
     //ValidateValues
     configDef.parse(propResolved)
   }
+
+  def getUserConfigs() = User.getConfigs()
 }

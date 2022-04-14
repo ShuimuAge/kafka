@@ -28,7 +28,8 @@ import java.util.concurrent.locks.ReentrantLock
 import com.yammer.metrics.core.Gauge
 import kafka.api.{ApiVersion, KAFKA_0_10_1_IV0, KAFKA_2_1_IV0, KAFKA_2_1_IV1, KAFKA_2_3_IV0}
 import kafka.common.{MessageFormatter, OffsetAndMetadata}
-import kafka.log.AppendOrigin
+import kafka.log.{AppendOrigin, LogAppendInfo}
+import kafka.message.NoCompressionCodec
 import kafka.metrics.KafkaMetricsGroup
 import kafka.server.{FetchLogEnd, ReplicaManager}
 import kafka.utils.CoreUtils.inLock
@@ -36,6 +37,7 @@ import kafka.utils._
 import kafka.zk.KafkaZkClient
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.clients.consumer.internals.ConsumerProtocol
+import org.apache.kafka.common.header.Header
 import org.apache.kafka.common.internals.Topic
 import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.metrics.stats.{Avg, Max, Meter}
@@ -45,12 +47,12 @@ import org.apache.kafka.common.protocol.types._
 import org.apache.kafka.common.record._
 import org.apache.kafka.common.requests.OffsetFetchResponse.PartitionData
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse
-import org.apache.kafka.common.requests.{OffsetCommitRequest, OffsetFetchResponse}
+import org.apache.kafka.common.requests.{OffsetCommitRequest, OffsetFetchResponse, FetchResponse, OffsetCommitResponse}
 import org.apache.kafka.common.utils.{Time, Utils}
 import org.apache.kafka.common.{KafkaException, TopicPartition}
 
 import scala.collection.JavaConverters._
-import scala.collection._
+import scala.collection.{mutable, _}
 import scala.collection.mutable.ArrayBuffer
 
 class GroupMetadataManager(brokerId: Int,
@@ -184,7 +186,8 @@ class GroupMetadataManager(brokerId: Int,
 
   def isPartitionOwned(partition: Int) = inLock(partitionLock) { ownedPartitions.contains(partition) }
 
-  def isPartitionLoading(partition: Int) = inLock(partitionLock) { loadingPartitions.contains(partition) }
+  def isPartitionLoading(partition: Int) = inLock(partitionLock) { loadingPartitions.contains(partition) ||
+    loadingRemotePartitions.contains(partition) }
 
   def partitionFor(groupId: String): Int = Utils.abs(groupId.hashCode) % groupMetadataTopicPartitionCount
 
@@ -237,12 +240,16 @@ class GroupMetadataManager(brokerId: Int,
         val timestamp = time.milliseconds()
         val key = GroupMetadataManager.groupMetadataKey(group.groupId)
         val value = GroupMetadataManager.groupMetadataValue(group, groupAssignment, interBrokerProtocolVersion)
+        val headers = group.remoteCluster.map(id => new Header {
+          override def key (): String = GroupMetadataManager.RECORD_HEAD_DIDI_HA_REMOTE_CLUSTER
+          override def value (): Array[Byte] = id.getBytes
+        }).toArray
 
         val records = {
           val buffer = ByteBuffer.allocate(AbstractRecords.estimateSizeInBytes(magicValue, compressionType,
-            Seq(new SimpleRecord(timestamp, key, value)).asJava))
+            Seq(new SimpleRecord(timestamp, key, value, headers)).asJava))
           val builder = MemoryRecords.builder(buffer, magicValue, compressionType, timestampType, 0L)
-          builder.append(timestamp, key, value)
+          builder.append(timestamp, key, value, headers)
           builder.build()
         }
 
@@ -359,6 +366,11 @@ class GroupMetadataManager(brokerId: Int,
           val records = filteredOffsetMetadata.map { case (topicPartition, offsetAndMetadata) =>
             val key = GroupMetadataManager.offsetCommitKey(group.groupId, topicPartition)
             val value = GroupMetadataManager.offsetCommitValue(offsetAndMetadata, interBrokerProtocolVersion)
+            val headers = group.remoteCluster.map(id => new Header {
+            override def key(): String = GroupMetadataManager.RECORD_HEAD_DIDI_HA_REMOTE_CLUSTER
+            override def value(): Array[Byte] = id.getBytes
+          }). toArray
+
             new SimpleRecord(timestamp, key, value)
           }
           val offsetTopicPartition = new TopicPartition(Topic.GROUP_METADATA_TOPIC_NAME, partitionFor(group.groupId))
@@ -539,6 +551,16 @@ class GroupMetadataManager(brokerId: Int,
       case t: Throwable => error(s"Error loading offsets from $topicPartition", t)
     } finally {
       inLock(partitionLock) {
+        // TODO
+        info(s"------ completePendingMirrorGroupsAnd0ffsets for $topicPartition")
+        try {
+          completePendingMirrorGroupsAndOffsets()
+        } catch {
+          case t: Throwable => error(s"Error loading remote offsets from $topicPartition", t)
+        } finally {
+          pendingMirrorGroups.clear()
+          pendingMirrorOffsets.clear()
+        }
         ownedPartitions.add(topicPartition.partition)
         loadingPartitions.remove(topicPartition.partition)
       }
@@ -956,7 +978,254 @@ class GroupMetadataManager(brokerId: Int,
     }
   }
 
-}
+  private val loadingRemotePartitions: mutable.Set[Int] = mutable.Set()
+  private val pendingMirrorOffsets = mutable.Map[GroupTopicPartition, (String, OffsetAndletadata)]()
+  private val pendingMirrorGroups = mutable.Map[String, (String, GroupMetadata)]()
+
+  private def completePendingMirrorGroupsAndOffsets(): Unit = {
+    pendingMirrorGroups.foreach {
+      case (groupId, (remoteClusterId, group)) =>
+        doLoadRemoteGroupMetadatas(groupId, group, remoteClusterId)
+    }
+
+    pendingMirrorOffsets.foreach {
+      case (groupTopicPartition, (remoteClusterId, offsetAndMetadata)) =>
+        doLoadRemoteGroupOffsets(groupTopicPartition, offsetAndMetadata, remoteClusterId)
+    }
+  }
+
+  def doMirrorGroupsAndOffsets(topicPartition: TopicPartition,
+                               fetchOffset: Long,
+                               partitionData: FetchResponse.PartitionData[Records],
+                               localClusterId: String,
+                               remoteClusterId: String): Option[LogAppendInfo] = {
+  val nowMs = time.milliseconds()
+  while ( ownedPartitions.contains(topicPartition.partition) &&
+    !loadingPartitions.contains(topicPartition.partition)) {
+    if (time.milliseconds() - nowMs < 9 * 1000) {
+      // retry
+      return Option.empty
+    }
+    info(s" ------ -< <>>> while ${time.milliseconds() - nowMs}")
+    time.sleep(100)
+  }
+
+  val memRecords = partitionData.records match {
+    case r: MemoryRecords => r
+    case r: FileRecords =>
+      val buffer = ByteBuffer.allocate(r.sizeInBytes)
+      r.readInto(buffer, 0)
+      MemoryRecords.readableRecords(buffer)
+  }
+
+  var firstOffset: Option[Long] = None
+  var lastOffset = -1L
+
+  val loadedOffsets = mutable.Map[GroupTopicPartition, OffsetAndMetadata]()
+  val loadedGroups = mutable.Map[String, GroupMetadata]()
+
+  memRecords.batches.asScala.foreach { batch =>
+    if (firstOffset isEmpty) {
+      firstOffset = Some(batch.baseOffset())
+    val lag = partitionData.highWatermark - batch.baseOffset() - 1
+    if (fetchOffset == 0 && lag > 0) inLock(partitionLock) {
+      info(s"Add mirror group remote loading partition ${topicPartition.partition()}")
+      loadingRemotePartitions.add(topicPartition.partition())
+    }
+  }
+
+  //update the last offset seen
+  lastOffset = batch.lastOffset
+
+  //暂时忽略事务下提交offset
+  val isTxnOffsetCommit = batch.isTransactional
+  if (batch.isControlBatch) {
+    // ignore Transactional COMMIT/ABORT
+  } else {
+  //info(s"Loading partition $topicPartition fetchOffset $fetchOffset batch offset ${batch.baseOffset()} highWatermark ${partitionData.highWatermark} lag $lag")
+  for (record <- batch.asScala) {
+    require( record.hasKey, "Group metadata/offset entry key should not be null")
+    record.headers().find(_.key().equals(GroupMetadataManager.RECORD_HEAD_DIDI_HA_REMOTE_CLUSTER) match {
+      case Some(h) if localClusterId == new String(h.value()) => {
+        // do nothing, 来自本集群group offset or metadata
+      }
+      case _ => {
+        GroupMetadataManager.readMessageKey(record.key) match {
+          case offsetKey: OffsetKey =>
+            // load offset
+            val groupTopicPartition = offsetKey.key
+            val groupId = groupTopicPartition.group
+            if (!record.hasValue) {
+              // TODO remove offset
+            } else {
+              // TODO leaderEpoch
+              val offsetAndMetadata = GroupMetadataManager.readOffsetMessageValue(record.value)
+              inLock(partitionLock) {
+                // TODO when loadingRemotePartitions contains this group id, add to pending
+                if (loadingPartitions.contains(partitionFor(groupId)) || pendingMirrorOffsets.contains(groupTopicPartition)) {
+                  pendingMirrorOffsets += groupTopicPartition -> (remoteClusterId, offsetAndMetadata)
+                  // TODO remove
+                  info(s"add pending load for offset $groupTopicPartition")
+                } else {
+                  loadedOffsets += groupTopicPartition -> offsetAndMetadata
+                }
+              }
+            }
+
+          case groupMetadataKey: GroupMetadataKey =>
+            // TODO 组状态同步待考虑
+            // load group metadata
+            val groupId = groupMetadataKey.key
+            val group = GroupMetadataManager.readGroupMessageValue(groupId, record.value, time)
+            if (group != null) {
+              inLock(partitionLock) {
+                // TODO when loadingRemotePartitions contains this group id, add to pending
+                if (loadingPartitions.contains(partitionFor(groupId)) || pendingMirrorGroups.contains(groupId)) inLock(partitionLock) {
+                  pendingMirrorGroups += groupId -> (remoteClusterId, group)
+                  // TODO remove
+                  info(s" add pending load for group $groupId")
+                } else {
+                  loadedGroups += groupId -> group
+                }
+              }
+            } else {
+              // TODO to remove group
+            }
+          case unKnownKey =>
+            throw new IllegalStateException(s"Unexpected message key $unKnownKey while loading offsets and group metadata")
+              }
+            }
+        }
+      }
+    }
+  }
+
+    loadedGroups.foreach {
+      case (groupId, group) =>
+        doLoadRemoteGroupMetadatas(groupId, group, remoteClusterId)
+    }
+
+    loadedOffsets.foreach {
+      case (groupTopicPartition, offsetAndMetadata) =>
+        doLoadRemoteGroupOffsets(groupTopicPartition, offsetAndMetadata, remoteClusterId)
+    }
+
+    val lastLag = partitionData.highWatermark - lastOffset - 1
+    //info(s"Loaded partition $topicPartition fetchOffset $fetchOffset batch offset ${batch.lastOffset()} highWatermark ${partitionData.highWatermark} lag $lastLag")
+    if (lastLag == 0) inLock(partitionLock) {
+      // clean loading groups
+      if (loadingRemotePartitions.remove(topicPartition.partition()))
+        info(s"Removed mirror group remote loading partition ${topicPartition.partition()}")
+    }
+
+    Option(analyzeAndValidateMirrorRecords(memRecords))
+  }
+
+  private def doLoadRemoteGroupMetadatas(groupId: String, group: GroupMetadata, remoteClusterId: String):
+    Unit = {
+    // TODO to load group
+    // TODO trace
+    info(s"Mirror group metadata for pending $groupId metadata $group")
+    val currentGroupOpt = getGroup(groupId)
+    if (!currentGroupOpt.exists(_.currentStateTimestamp.getOrElse(-1L) > group.currentStateTimestamp.getOrElse(-1L))) {
+      //overwrite group metadata
+      currentGroupOpt.foreach {
+        currentGroup => {
+          val initialOffsets = currentGroup.allOffsets.map { case (topicPartition, offsetAndMetadata) =>
+            (topicPartition, CommitRecordMetadataAndOffset(Option(0), offsetAndMetadata))
+          }
+          group.initializeOffsets(initialOffsets, Map.empty)
+        }
+      }
+      groupMetadataCache.put(group.groupId, group)
+      group.remoteCluster = Option(remoteClusterId) // use in record header
+      storeGroup(group, group.allMemberMetadata.map(m => m.memberId -> m.assignment).toMap, error => {
+        if (error != Errors.NONE) {
+          warn(s"Mirror group metadata ${groupId} failed: ${error.message}")
+        }
+      })
+    }
+  }
+
+  private def doLoadRemoteGroupOffsets(groupTopicPartition: GroupTopicPartition, offsetAndMetadata:
+    OffsetAndMetadata, remoteClusterId: String): Unit = {
+    // TODO trace
+    info(s"Mirror group offset for pending $groupTopicPartition metadata $offsetAndMetadata")
+    val groupId = groupTopicPartition.group
+    val group = getGroup(groupId) match {
+      case None =>
+        addGroup(new GroupMetadata(groupId, Empty, time))
+      case Some(group) =>
+        group
+    }
+    // do when not exists or less then pending commitT imestamp
+    if (!group.offset(groupTopicPartition.topicPartition)
+      .exists(_.commitTimestamp > offsetAndMetadata.commitTimestamp)) {
+      group.remoteCluster = Option(remoteClusterId) // use in record header
+      storeOffsets(group, "mirror-group", immutable.Map(groupTopicPartition.topicPartition ->
+        offsetAndMetadata), commitStatus => {
+        commitStatus.foreach { case (topicPartition, error) =>
+          if (error != Errors.NONE) {
+            warn(s"Mirror group offset commit on partition $topicPartition failed due to ${error.exceptionName}")
+          }
+        }
+      })
+    }
+  }
+
+  // mock LogAppendInfo
+  private def analyzeAndValidateMirrorRecords(records: MemoryRecords): LogAppendInfo = {
+  var shallowMessageCount = 0
+  var validBytesCount = 0
+  var firstOffset: Option[Long] = None
+  var lastOffset = -1L
+  var monotonic = true
+  var maxTimestamp = RecordBatch.NO_TIMESTAMP
+  var offsetOfMaxTimestamp = -1L
+  var readFirstMessage = false
+  var lastOffsetOfFirstBatch = -1L
+
+    for (batch <- records.batches.asScala) {
+      if (!readFirstMessage) {
+        if (batch.magic >= RecordBatch.MAGIC_VALUE_V2)
+          firstOffset = Some(batch.baseOffset)
+        lastOffsetOfFirstBatch = batch.lastOffset
+        readFirstMessage = true
+      }
+
+      // check that offsets are monotonically increasing
+      if (lastOffset >= batch.lastOffset)
+        monotonic = false
+
+      //update the last offset seen
+      lastOffset = batch.lastOffset
+
+      // Check if the message sizes are valid.
+      val batchSize = batch.sizeInBytes
+      if (batch.maxTimestamp > maxTimestamp) {
+        maxTimestamp = batch.maxTimestamp
+        offsetOfMaxTimestamp = lastOffset
+      }
+
+      shallowMessageCount += 1
+      validBytesCount += batchSize
+    }
+      LogAppendInfo(
+        firstOffset,
+        lastOffset,
+        maxTimestamp,
+        offsetOfMaxTimestamp,
+        RecordBatch.NO_TIMESTAMP,
+        -1,
+        RecordConversionStats.EMPTY,
+        NoCompressionCodec,
+        NoCompressionCodec,
+        shallowMessageCount,
+        validBytesCount,
+        monotonic,
+        lastOffsetOfFirstBatch)
+    }
+  }
 
 /**
  * Messages stored for the group topic has versions for both the key and value fields. Key
@@ -974,6 +1243,8 @@ class GroupMetadataManager(brokerId: Int,
  *    -> value version 0:       [protocol_type, generation, protocol, leader, members]
  */
 object GroupMetadataManager {
+
+  val RECORD_HEAD_DIDI_HA_REMOTE_CLUSTER ="didi.kafka.ha.remoteCluster"
 
   private val CURRENT_OFFSET_KEY_SCHEMA_VERSION = 1.toShort
   private val CURRENT_GROUP_KEY_SCHEMA_VERSION = 2.toShort

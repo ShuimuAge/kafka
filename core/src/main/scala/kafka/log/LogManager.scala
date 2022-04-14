@@ -1039,7 +1039,7 @@ class LogManager(logDirs: Seq[File],
 }
 
 object LogManager {
-
+  //recovery-point-offset-checkpoint：leader副本所在的broker中保存的检查点文件，记录各副本的LEO
   val RecoveryPointCheckpointFile = "recovery-point-offset-checkpoint"
   val LogStartOffsetCheckpointFile = "log-start-offset-checkpoint"
   val ProducerIdExpirationCheckIntervalMs = 10 * 60 * 1000

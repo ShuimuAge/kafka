@@ -18,7 +18,6 @@
 package kafka.server
 
 import java.util.Properties
-
 import DynamicConfig.Broker._
 import kafka.api.ApiVersion
 import kafka.controller.KafkaController
@@ -32,6 +31,7 @@ import org.apache.kafka.common.config.ConfigException
 import org.apache.kafka.common.metrics.Quota
 import org.apache.kafka.common.metrics.Quota._
 import org.apache.kafka.common.utils.Sanitizer
+import org.apache.kafka.common.config.manager.{ClusterConfigManager, TopicConfigManager, UserConfigManager}
 
 import scala.collection.JavaConverters._
 import scala.collection.Seq
@@ -48,7 +48,7 @@ trait ConfigHandler {
   * The TopicConfigHandler will process topic config changes in ZK.
   * The callback provides the topic name and the full properties set read from ZK
   */
-class TopicConfigHandler(private val logManager: LogManager, kafkaConfig: KafkaConfig, val quotas: QuotaManagers, kafkaController: KafkaController) extends ConfigHandler with Logging  {
+class TopicConfigHandler(private val logManager: LogManager, kafkaConfig: KafkaConfig, val quotas: QuotaManagers, kafkaController: KafkaController, topicConfigManager: TopicConfigManager) extends ConfigHandler with Logging  {
 
   private def updateLogConfig(topic: String,
                               topicConfig: Properties,
@@ -67,6 +67,7 @@ class TopicConfigHandler(private val logManager: LogManager, kafkaConfig: KafkaC
   }
 
   def processConfigChanges(topic: String, topicConfig: Properties): Unit = {
+    topicConfigManager.configure(topic, topicConfig)
     // Validate the configurations.
     val configNamesToExclude = excludedConfigs(topic, topicConfig)
 
@@ -165,16 +166,26 @@ class ClientIdConfigHandler(private val quotaManagers: QuotaManagers) extends Qu
  */
 class UserConfigHandler(private val quotaManagers: QuotaManagers, val credentialProvider: CredentialProvider) extends QuotaConfigHandler(quotaManagers) with ConfigHandler {
 
+  val userConfigManager = new UserConfigManager
+
   def processConfigChanges(quotaEntityPath: String, config: Properties): Unit = {
     // Entity path is <user> or <user>/clients/<client>
     val entities = quotaEntityPath.split("/")
     if (entities.length != 1 && entities.length != 3)
       throw new IllegalArgumentException("Invalid quota entity path: " + quotaEntityPath)
     val sanitizedUser = entities(0)
+    userConfigManager.configure(sanitizedUser, config)
     val sanitizedClientId = if (entities.length == 3) Some(entities(2)) else None
     updateQuotaConfig(Some(sanitizedUser), sanitizedClientId, config)
     if (!sanitizedClientId.isDefined && sanitizedUser != ConfigEntityName.Default)
       credentialProvider.updateCredentials(Sanitizer.desanitize(sanitizedUser), config)
+  }
+}
+
+class ClusterConfigHandler() extends ConfigHandler with Logging {
+  val clusterConfigManager = new ClusterConfigManager
+  def processConfigChanges(clusterId: String, properties: Properties) {
+    clusterConfigManager.configure(clusterId, properties)
   }
 }
 

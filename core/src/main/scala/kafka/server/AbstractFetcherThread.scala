@@ -19,7 +19,7 @@ package kafka.server
 
 import java.nio.ByteBuffer
 import java.util
-import java.util.Optional
+import java.util.{Optional}
 import java.util.concurrent.locks.ReentrantLock
 
 import kafka.cluster.BrokerEndPoint
@@ -44,6 +44,7 @@ import org.apache.kafka.common.internals.PartitionStates
 import org.apache.kafka.common.record.{FileRecords, MemoryRecords, Records}
 import org.apache.kafka.common.requests._
 
+//import java.util.stream.Collectors
 import scala.math._
 
 /**
@@ -275,7 +276,7 @@ abstract class AbstractFetcherThread(name: String,
    * remove the partition if the partition state is NOT updated. Otherwise, keep the partition active.
    * @return true if the epoch in this thread is updated. otherwise, false
    */
-  private def onPartitionFenced(tp: TopicPartition, requestEpoch: Option[Int]): Boolean = inLock(partitionMapLock) {
+  protected def onPartitionFenced(tp: TopicPartition, requestEpoch: Option[Int]): Boolean = inLock(partitionMapLock) {
     Option(partitionStates.stateValue(tp)).exists { currentFetchState =>
       val currentLeaderEpoch = currentFetchState.currentLeaderEpoch
       if (requestEpoch.contains(currentLeaderEpoch)) {
@@ -655,6 +656,21 @@ abstract class AbstractFetcherThread(name: String,
     partitionMapLock.lockInterruptibly()
     try partitionStates.size
     finally partitionMapLock.unlock()
+  }
+
+  def allPartitions(): Set[TopicPartition] = inLock(partitionMapLock) {
+    partitionStates.partitionStateMap().asScala
+      .map { case (topicPartition, _) =>
+        topicPartition
+      }.toSet
+  }
+
+  def delayedPartitions(): Set[TopicPartition] = inLock(partitionMapLock) {
+    partitionStates.partitionStateMap().asScala.filter { case (_, currentFetchState) =>
+      currentFetchState.isDelayed
+    }.map { case (topicPartition, _) =>
+      topicPartition
+    }.toSet
   }
 
   // Visible for testing

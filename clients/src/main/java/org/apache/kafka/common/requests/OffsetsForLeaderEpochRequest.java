@@ -107,7 +107,7 @@ public class OffsetsForLeaderEpochRequest extends AbstractRequest {
         private final Map<TopicPartition, PartitionData> epochsByPartition;
         private final int replicaId;
 
-        Builder(short oldestAllowedVersion, short latestAllowedVersion, Map<TopicPartition, PartitionData> epochsByPartition, int replicaId) {
+        public Builder(short oldestAllowedVersion, short latestAllowedVersion, Map<TopicPartition, PartitionData> epochsByPartition, int replicaId) {
             super(ApiKeys.OFFSET_FOR_LEADER_EPOCH, oldestAllowedVersion, latestAllowedVersion);
             this.epochsByPartition = epochsByPartition;
             this.replicaId = replicaId;

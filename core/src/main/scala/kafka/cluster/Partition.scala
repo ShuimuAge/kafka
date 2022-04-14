@@ -624,6 +624,8 @@ class Partition(val topicPartition: TopicPartition,
           s"${followerFetchOffsetMetadata.messageOffset} and log start offset $followerStartOffset.")
         true
 
+      case None if (followerId >= 100000000) =>
+        true // TODO mirror followerId return true
       case None =>
         false
     }
@@ -1184,6 +1186,9 @@ class Partition(val topicPartition: TopicPartition,
   }
 
   private[cluster] def shrinkIsr(newIsr: Set[Int]): Unit = {
+    //localBrokerId:当前分区leader副本所在broker的id
+    //leaderEpoch:当前分区的leaderEpoch
+    //newIsr:更新后的ISR
     val newLeaderAndIsr = new LeaderAndIsr(localBrokerId, leaderEpoch, newIsr.toList, zkVersion)
     val zkVersionOpt = stateStore.shrinkIsr(controllerEpoch, newLeaderAndIsr)
     maybeUpdateIsrAndVersion(newIsr, zkVersionOpt)

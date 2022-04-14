@@ -470,6 +470,20 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
 
   }
 
+
+  /**
+   * Gets all users in the cluster.
+   * @return sequence of topics in the cluster.
+   */
+  def getAllConfiguredUsers: Set [String] = {
+    val getChildrenResponse = retryRequestUntilConnected(GetChildrenRequest(ConfigEntityTypeZNode path (s"users")))
+    getChildrenResponse.resultCode match {
+      case Code.OK => getChildrenResponse.children.toSet
+      case Code.NONODE => Set.empty
+      case _ => throw getChildrenResponse.resultException.get
+    }
+  }
+
   /**
    * Checks the topic existence
    * @param topicName

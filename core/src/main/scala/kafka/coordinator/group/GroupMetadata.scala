@@ -198,6 +198,8 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
 
   private[group] val lock = new ReentrantLock
 
+  var remoteCluster: Option [String] = None
+
   private var state: GroupState = initialState
   var currentStateTimestamp: Option[Long] = Some(time.milliseconds())
   var protocolType: Option[String] = None

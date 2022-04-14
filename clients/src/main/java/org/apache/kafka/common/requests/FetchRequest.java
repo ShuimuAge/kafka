@@ -44,6 +44,7 @@ import static org.apache.kafka.common.protocol.CommonFields.TOPIC_NAME;
 import static org.apache.kafka.common.requests.FetchMetadata.FINAL_EPOCH;
 import static org.apache.kafka.common.requests.FetchMetadata.INVALID_SESSION_ID;
 
+//follower 副本向leader副本拉取数据时的拉取请求
 public class FetchRequest extends AbstractRequest {
     public static final int CONSUMER_REPLICA_ID = -1;
 
@@ -73,6 +74,7 @@ public class FetchRequest extends AbstractRequest {
     // partition level fields
     private static final Field.Int32 REPLICA_ID = new Field.Int32("replica_id",
             "Broker id of the follower. For normal consumers, use -1.");
+    //follower 副本向leader副本拉取数据时，在拉取的请求FetchRequest中带上自己的LEO信息，就是fetch_offset
     private static final Field.Int64 FETCH_OFFSET = new Field.Int64("fetch_offset", "Message offset.");
     private static final Field.Int32 PARTITION_MAX_BYTES = new Field.Int32("partition_max_bytes",
             "Maximum bytes to fetch.");

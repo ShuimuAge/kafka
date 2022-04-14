@@ -38,7 +38,8 @@ object ConfigType {
   val Client = "clients"
   val User = "users"
   val Broker = "brokers"
-  val all = Seq(Topic, Client, User, Broker)
+  val HACluster = "ha-clusters"
+  val all = Seq(Topic, Client, User, Broker, HACluster)
 }
 
 object ConfigEntityName {

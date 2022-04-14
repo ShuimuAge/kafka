@@ -58,6 +58,8 @@ private[kafka] object AppendOrigin {
    * The log append came from the client, which implies full validation.
    */
   case object Client extends AppendOrigin
+
+  case object Mirror extends AppendOrigin
 }
 
 private[log] object LogValidator extends Logging {

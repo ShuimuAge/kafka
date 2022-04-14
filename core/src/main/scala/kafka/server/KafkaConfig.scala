@@ -17,9 +17,11 @@
 
 package kafka.server
 
+import com.sun.java.util.jar.pack.Instruction.getShort
+import jdk.internal.jline.internal.Configuration.getString
+
 import java.util
 import java.util.{Collections, Locale, Properties}
-
 import kafka.api.{ApiVersion, ApiVersionValidator, KAFKA_0_10_0_IV1, KAFKA_2_1_IV0}
 import kafka.cluster.EndPoint
 import kafka.coordinator.group.OffsetConfig
@@ -43,6 +45,8 @@ import org.apache.kafka.common.utils.Utils
 import org.apache.kafka.server.authorizer.Authorizer
 import org.apache.zookeeper.client.ZKClientConfig
 
+import java.lang.Boolean.getBoolean
+import java.lang.Long.getLong
 import scala.collection.JavaConverters._
 import scala.collection.{Map, Seq}
 
@@ -131,6 +135,11 @@ object Defaults {
   val MinInSyncReplicas = 1
   val MessageDownConversionEnable = true
 
+  val DiDiHASyncTopicPartitionsEnabled = false
+  val DiDiHASyncTopicConfigsEnabled = false
+  val DiDiHASyncTopicAclsEnabled = false
+  val DiDiMirrorStateTopicReplicationFactor = 3.toShort
+  val DiDiMirrorStateTopicPartitions: Int = 50
   /** ********* Replication configuration ***********/
   val ControllerSocketTimeoutMs = RequestTimeoutMs
   val ControllerMessageQueueSize = Int.MaxValue
@@ -344,6 +353,9 @@ object KafkaConfig {
   val QueuedMaxRequestsProp = "queued.max.requests"
   val QueuedMaxBytesProp = "queued.max.request.bytes"
   val RequestTimeoutMsProp = CommonClientConfigs.REQUEST_TIMEOUT_MS_CONFIG
+
+  val DiDiMirrorStateTopicReplicationFactorProp = "didi.mirror.state.topic.replication.factor"
+  val DiDiMirrorStateTopicPartitionsProp = "didi.mirror.state.topic.num.partitions"
   /************* Authorizer Configuration ***********/
   val AuthorizerClassNameProp = "authorizer.class.name"
   /** ********* Socket Server Configuration ***********/
@@ -487,6 +499,18 @@ object KafkaConfig {
   val DeleteTopicEnableProp = "delete.topic.enable"
   val CompressionTypeProp = "compression.type"
 
+  /** ******* didi kafka Configuration ********/
+  val ClusterIdProp = "cluster.id"
+  val ClusterIdUpdateProp = " cluster.id.update"
+  val GatewayUrlProp = "gateway.url"
+  val DiskLoadProtectorEnableProp = "disk.load.protector.enable"
+  val SessionReportTimeMsProp = "session.report.time.ms"
+  val KafkaExMetricsEnableAllProp = "kafka.ex.metrics.enable.all"
+  val MaxThrottleTimeMsProp = "max.throttle.time.ms"
+  val DiDiMirrorSyncPartitionsIntervalMsProp = "didi.mirror.sync.partitions.interval.ms"
+  val DiDiMirrorSyncAclConfigsIntervalMsProp = "didi.mirror.sync.acl.configs.interval.ms"
+  val DiDiMirrorNumFetchersProp = "didi.mirror.num.fetchers"
+
   /** ********* Kafka Metrics Configuration ***********/
   val MetricSampleWindowMsProp = CommonClientConfigs.METRICS_SAMPLE_WINDOW_MS_CONFIG
   val MetricNumSamplesProp: String = CommonClientConfigs.METRICS_NUM_SAMPLES_CONFIG
@@ -520,6 +544,8 @@ object KafkaConfig {
   val SslSecureRandomImplementationProp = SslConfigs.SSL_SECURE_RANDOM_IMPLEMENTATION_CONFIG
   val SslClientAuthProp = BrokerSecurityConfigs.SSL_CLIENT_AUTH_CONFIG
   val SslPrincipalMappingRulesProp = BrokerSecurityConfigs.SSL_PRINCIPAL_MAPPING_RULES_CONFIG
+
+  def getInt(ClusterIdProp: Any): Int = ???
 
   /** ********* SASL Configuration ****************/
   val SaslMechanismInterBrokerProtocolProp = "sasl.mechanism.inter.broker.protocol"
@@ -982,6 +1008,8 @@ object KafkaConfig {
       .define(BrokerIdGenerationEnableProp, BOOLEAN, Defaults.BrokerIdGenerationEnable, MEDIUM, BrokerIdGenerationEnableDoc)
       .define(MaxReservedBrokerIdProp, INT, Defaults.MaxReservedBrokerId, atLeast(0), MEDIUM, MaxReservedBrokerIdDoc)
       .define(BrokerIdProp, INT, Defaults.BrokerId, HIGH, BrokerIdDoc)
+      .define(DiDiMirrorStateTopicReplicationFactorProp, SHORT, Defaults.DiDiMirrorStateTopicReplicationFactor, atLeast(1), HIGH, "")
+      .define(DiDiMirrorStateTopicPartitionsProp, INT, Defaults.DiDiMirrorStateTopicPartitions, atLeast(1), HIGH, "")
       .define(MessageMaxBytesProp, INT, Defaults.MessageMaxBytes, atLeast(0), HIGH, MessageMaxBytesDoc)
       .define(NumNetworkThreadsProp, INT, Defaults.NumNetworkThreads, atLeast(1), HIGH, NumNetworkThreadsDoc)
       .define(NumIoThreadsProp, INT, Defaults.NumIoThreads, atLeast(1), HIGH, NumIoThreadsDoc)
@@ -1391,6 +1419,32 @@ class KafkaConfig(val props: java.util.Map[_, _], doLog: Boolean, dynamicConfigO
   val brokerIdGenerationEnable: Boolean = getBoolean(KafkaConfig.BrokerIdGenerationEnableProp)
   val maxReservedBrokerId: Int = getInt(KafkaConfig.MaxReservedBrokerIdProp)
   var brokerId: Int = getInt(KafkaConfig.BrokerIdProp)
+
+  val mirrorStateTopicReplicationFactor = getShort(KafkaConfig.DiDiMirrorStateTopicReplicationFactorProp)
+  val mirrorStateTopicPartitions = getInt (KafkaConfig.DiDiMirrorStateTopicPartitionsProp)
+
+  def numNetworkThreads = getInt(KafkaConfig.NumNetworkThreadsProp)
+  def backgroundThreads = getInt(KafkaConfig.BackgroundThreadsProp)
+  val queuedMaxRequests = getInt(KafkaConfig.QueuedMaxRequestsProp)
+  val queuedMaxBytes = getLong(KafkaConfig.QueuedMaxBytesProp)
+  def numIoThreads = getInt(KafkaConfig.NumIoThreadsProp)
+  def messageMaxBytes = getInt(KafkaConfig.MessageMaxBytesProp)
+  val requestTimeoutMs = getInt(KafkaConfig.RequestTimeoutMsProp)
+
+  /** ********* Didi Kafka Configuration ****************/
+  var clusterId: Int = getInt(KafkaConfig.ClusterIdProp)
+  var clusterIdUpdate: Boolean = getBoolean(KafkaConfig.ClusterIdUpdateProp)
+  var gatewayUrl: String = getString(KafkaConfig.GatewayUrlProp)
+  var diskLoadProtectorEnable: Boolean = getBoolean(KafkaConfig.DiskLoadProtectorEnableProp)
+  var sessionReportTimeMs: Int = getInt(KafkaConfig.SessionReportTimeMsProp)
+  var kafkaExMetricsEnableAll: Boolean = getBoolean(KafkaConfig.KafkaExMetricsEnableAllProp)
+  var maxThrottleTimeMs: Int = getInt(KafkaConfig.MaxThrottleTimeMsProp)
+
+  val mirrorStateTopicReplicationFactor = getShort(KafkaConfig.DiDiMirrorStateTopicReplicationFactorProp)
+  val mirrorStateTopicPartitions = getInt(KafkaConfig.DiDiMirrorStateTopicPartitionsProp)
+  val mirrorSyncPartitionsIntervalMs = getLong(KafkaConfig.DiDiMirrorSyncPartitionsIntervalMsProp)
+  val mirrorSyncAclConfigsIntervalMs = getLong(KafkaConfig.DiDiMirrorSyncAclConfigsIntervalMsProp)
+  val mirrorNumFetchers = getInt(KafkaConfig.DiDiMirrorNumFetchersProp)
 
   def numNetworkThreads = getInt(KafkaConfig.NumNetworkThreadsProp)
   def backgroundThreads = getInt(KafkaConfig.BackgroundThreadsProp)

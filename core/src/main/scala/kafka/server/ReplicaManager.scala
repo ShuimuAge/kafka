@@ -16,12 +16,14 @@
  */
 package kafka.server
 
+import kafka.ssy.datachannel.HAClusterConfig
+import org.apache.kafka.common.config.manager.ClusterConfigManager
+
 import java.io.File
 import java.util.Optional
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 import java.util.concurrent.locks.Lock
-
 import com.yammer.metrics.core.Meter
 import kafka.api._
 import kafka.cluster.{BrokerEndPoint, Partition}
@@ -29,37 +31,52 @@ import kafka.common.RecordValidationException
 import kafka.controller.{KafkaController, StateChangeLogger}
 import kafka.log._
 import kafka.metrics.KafkaMetricsGroup
-import kafka.server.{FetchMetadata => SFetchMetadata}
 import kafka.server.HostedPartition.Online
 import kafka.server.QuotaFactory.QuotaManagers
 import kafka.server.checkpoints.{LazyOffsetCheckpoints, OffsetCheckpointFile, OffsetCheckpoints}
+import kafka.server.{FetchMetadata => SFetchMetadata}
+import kafka.utils.CoreUtils.inLock
 import kafka.utils._
 import kafka.zk.KafkaZkClient
-import org.apache.kafka.common.{ElectionType, IsolationLevel, Node, TopicPartition}
+import org.apache.kafka.clients.Metadata.LeaderAndEpoch
+import org.apache.kafka.clients.producer.internals.ProducerMetadata
+import org.apache.kafka.clients.{ApiVersions, ClientDnsLookup, ClientUtils, KafkaClient, NetworkClient}
+import org.apache.kafka.clients._
 import org.apache.kafka.common.errors._
-import org.apache.kafka.common.internals.Topic
+import org.apache.kafka.common.internals.{ClusterResourceListeners, Topic}
 import org.apache.kafka.common.message.LeaderAndIsrRequestData.LeaderAndIsrPartitionState
 import org.apache.kafka.common.message.LeaderAndIsrResponseData
 import org.apache.kafka.common.message.LeaderAndIsrResponseData.LeaderAndIsrPartitionError
 import org.apache.kafka.common.metrics.Metrics
-import org.apache.kafka.common.network.ListenerName
+import org.apache.kafka.common.network.{ListenerName, NetworkReceive, Selectable, Selector}
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.record.FileRecords.TimestampAndOffset
 import org.apache.kafka.common.record._
 import org.apache.kafka.common.replica.PartitionView.DefaultPartitionView
 import org.apache.kafka.common.replica.ReplicaView.DefaultReplicaView
-import org.apache.kafka.common.replica.{ClientMetadata, _}
+import org.apache.kafka.common.replica._
 import org.apache.kafka.common.requests.DescribeLogDirsResponse.{LogDirInfo, ReplicaInfo}
 import org.apache.kafka.common.requests.EpochEndOffset._
 import org.apache.kafka.common.requests.FetchRequest.PartitionData
 import org.apache.kafka.common.requests.FetchResponse.AbortedTransaction
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse
 import org.apache.kafka.common.requests._
-import org.apache.kafka.common.utils.Time
+import org.apache.kafka.common.utils.{LogContext, Time}
+import org.apache.kafka.common.{ElectionType, IsolationLevel, Node, TopicPartition}
+import org.apache.kafka.common.{Cluster, ElectionType, IsolationLevel, Node, TopicPartition}
+import org.apache.kafka.common.internals.{ClusterResourceListeners, Topic}
 
+import java.io.File
+import java.net.InetSocketAddress
+import java.util
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
+import java.util.concurrent.locks.{Lock, ReentrantLock}
+import java.util.{Optional, Properties}
 import scala.collection.JavaConverters._
 import scala.collection.{Map, Seq, Set, mutable}
 import scala.compat.java8.OptionConverters._
+import kafka.utils.Implicits._
 
 /*
  * Result metadata of a log append operation on the log
@@ -148,6 +165,7 @@ object HostedPartition {
 }
 
 object ReplicaManager {
+  //recovery-point-offset-checkpoint：leader副本所在的broker中保存的检查点文件，记录各副本的HW
   val HighWatermarkFilename = "replication-offset-checkpoint"
   val IsrChangePropagationBlackOut = 5000L
   val IsrChangePropagationInterval = 60000L
@@ -206,6 +224,7 @@ class ReplicaManager(val config: KafkaConfig,
   )
   private val replicaStateChangeLock = new Object
   val replicaFetcherManager = createReplicaFetcherManager(metrics, time, threadNamePrefix, quotaManagers.follower)
+  val mirrorFetcherManager = createMirrorFetcherManager(metrics, time, threadNamePrefix, quotaManagers.mirrorFollower)
   val replicaAlterLogDirsManager = createReplicaAlterLogDirsManager(quotaManagers.alterLogDirs, brokerTopicStats)
   private val highWatermarkCheckPointThreadStarted = new AtomicBoolean(false)
   @volatile var highWatermarkCheckpoints: Map[String, OffsetCheckpointFile] = logManager.liveLogDirs.map(dir =>
@@ -217,6 +236,11 @@ class ReplicaManager(val config: KafkaConfig,
   private val isrChangeSet: mutable.Set[TopicPartition] = new mutable.HashSet[TopicPartition]()
   private val lastIsrChangeMs = new AtomicLong(System.currentTimeMillis())
   private val lastIsrPropagationMs = new AtomicLong(System.currentTimeMillis())
+
+  private val mirrorTopics = mutable.HashMap[String, MirrorTopic]()
+
+  // local topic -> remote topic
+  private val mirrorTopicsByLocal = mutable.HashMap[String, MirrorTopic]()
 
   private var logDirFailureHandler: LogDirFailureHandler = null
 
@@ -312,6 +336,8 @@ class ReplicaManager(val config: KafkaConfig,
     val haltBrokerOnFailure = config.interBrokerProtocolVersion < KAFKA_1_0_IV0
     logDirFailureHandler = new LogDirFailureHandler("LogDirFailureHandler", haltBrokerOnFailure)
     logDirFailureHandler.start()
+    mirrorMetadataThread = new RemoteMetadataThread("mirror- remote metadata-thread", 10 * 1000, TimeUnit.MILLISECONDS)
+    mirrorMetadataThread.start()
   }
 
   private def maybeRemoveTopicMetrics(topic: String): Unit = {
@@ -375,6 +401,8 @@ class ReplicaManager(val config: KafkaConfig,
         val partitions = stopReplicaRequest.partitions.asScala.toSet
         controllerEpoch = stopReplicaRequest.controllerEpoch
         // First stop fetchers for all partitions, then stop the corresponding replicas
+        removeMirrors(partitions.flatMap(p => mirrorTopicsByLocal.get(p.topic)
+          .map(mt => new TopicPartition(mt.remoteTopic, p.partition()))), "local state change to stop replica")
         replicaFetcherManager.removeFetcherForPartitions(partitions)
         replicaAlterLogDirsManager.removeFetcherForPartitions(partitions)
         for (topicPartition <- partitions){
@@ -1154,6 +1182,10 @@ class ReplicaManager(val config: KafkaConfig,
       } else {
         val deletedPartitions = metadataCache.updateMetadata(correlationId, updateMetadataRequest)
         controllerEpoch = updateMetadataRequest.controllerEpoch
+        // remove mirror unknown topic
+        updateMetadataRequest.partitionStates().asScala
+          .filter(s => s.leader() != LeaderAndIsr.LeaderDuringDelete)
+          .foreach(s => removeUnknownLocalMirrorTopic(s.topicName()))
         deletedPartitions
       }
     }
@@ -1307,6 +1339,7 @@ class ReplicaManager(val config: KafkaConfig,
 
         replicaFetcherManager.shutdownIdleFetcherThreads()
         replicaAlterLogDirsManager.shutdownIdleFetcherThreads()
+        mirrorFetcherManager.shutdownIdleFetcherThreads()
         onLeadershipChange(partitionsBecomeLeader, partitionsBecomeFollower)
         val responsePartitions = responseMap.iterator.map { case (tp, error) =>
           new LeaderAndIsrPartitionError()
@@ -1350,6 +1383,12 @@ class ReplicaManager(val config: KafkaConfig,
       responseMap.put(partition.topicPartition, Errors.NONE)
 
     val partitionsToMakeLeaders = mutable.Set[Partition]()
+
+    // add mirror topic to fetch remote data
+    val partitionsToMakeMirrors = partitionsToMakeLeaders
+      .flatMap(p => mirrorTopicsByLocal.get(p.topic)
+        .map(mt => new TopicPartition(mt.remoteTopic, p.partitionId)))
+    makeMirrors(partitionsToMakeMirrors)
 
     try {
       // First stop fetchers for all the partitions
@@ -1432,6 +1471,13 @@ class ReplicaManager(val config: KafkaConfig,
 
     val partitionsToMakeFollower: mutable.Set[Partition] = mutable.Set()
     try {
+      // First stop mirror fetchers for all the partitions
+      removeMirrors(
+        //partitionStates.keySet.filterlp => mirrorTopics.contains(p.topic)).map(_.topicPartition),
+        partitionStates.keySet.flatMap(p => mirrorTopicsByLocal.get(p.topic)
+          .map(mt => new TopicPartition(mt.remoteTopic, p.partitionId))),
+        "local state change to follower")
+
       // TODO: Delete leaders from LeaderAndIsrRequest
       partitionStates.foreach { case (partition, partitionState) =>
         val newLeaderBrokerId = partitionState.leader
@@ -1664,7 +1710,19 @@ class ReplicaManager(val config: KafkaConfig,
     removeMetrics()
     if (logDirFailureHandler != null)
       logDirFailureHandler.shutdown()
+    if (mirrorMetadataThread != null)
+      mirrorMetadataThread.shutdown()
+    remoteClients.foreach {
+      case (clusterId, client) => {
+        try client.close()
+        catch {
+          case e: Exception =>
+            error(s"Failed to close cluster $clusterId network client", e)
+        }
+      }
+    }
     replicaFetcherManager.shutdown()
+    mirrorFetcherManager.shutdown()
     replicaAlterLogDirsManager.shutdown()
     delayedFetchPurgatory.shutdown()
     delayedProducePurgatory.shutdown()
@@ -1678,6 +1736,11 @@ class ReplicaManager(val config: KafkaConfig,
 
   protected def createReplicaFetcherManager(metrics: Metrics, time: Time, threadNamePrefix: Option[String], quotaManager: ReplicationQuotaManager) = {
     new ReplicaFetcherManager(config, this, metrics, time, threadNamePrefix, quotaManager)
+  }
+
+  protected def createMirrorFetcherManager(metrics: Metrics, time: Time, threadNamePrefix: Option[String],
+                                           quotaManager: ReplicationQuotaManager) = {
+    new MirrorFetcherManager(config, this, metrics, time, threadNamePrefix, quotaManager)
   }
 
   protected def createReplicaAlterLogDirsManager(quotaManager: ReplicationQuotaManager, brokerTopicStats: BrokerTopicStats) = {
@@ -1753,4 +1816,397 @@ class ReplicaManager(val config: KafkaConfig,
 
     controller.electLeaders(partitions, electionType, electionCallback)
   }
+
+  newGauge("MirrorTopicCount", () => mirrorTopics.size)
+  newGauge("MirrorRemoteClusterCount", () => remoteClients.size)
+  newGauge("MirrorUnknownTopicCount", () => unknownMirrorTopicLocalNames.size)
+  newGauge("MirrorPartitionCount", () => mirrorFetcherManager.allPartitions().size)
+  newGauge("MirrorFetchedPartitionCount" , () => mirrorFetcherManager.allFetchedPartitions().size)
+    newGauge("MirrorFailedPartitionCount", () => mirrorFetcherManager.allFailedPartitions().size)
+    newGauge("MirrorDelayedPartitionCount", () => delayedMakeMirrorPartitions.size)
+    newGauge("MirrorPartitionMetadataCount", () => remoteLeaderAndEpochs.size)
+
+  private val remoteClients = mutable.HashMap[String, KafkaClient]()
+  private val remoteMetadatas = mutable.HashMap[String, ProducerMetadata]()
+  private val remoteLeaderAndEpochs = mutable.HashMap[TopicPartition, LeaderAndEpoch]()
+  //unknown remote topic partition metadata
+  private val delayedMakeMirrorPartitions = mutable.Set[TopicPartition]()
+  private val unknownMirrorTopicLocalNames = mutable.Set[String]()
+
+  //需要本节点处理未知topic的元数据
+  val unknownMirrorTopicLocalNamesNeedMetadata = mutable.Set[String]()
+
+  /* lock protecting access to mirror fetchers */
+  private val mirrorFetcherLock = new ReentrantLock()
+  private var mirrorMetadataThread: RemoteMetadataThread = null
+
+  private def newRemoteClient(remoteCluster: String, config: HAClusterConfig): (KafkaClient, ProducerMetadata) = {
+    info(s"Create remote connection for cluster $remoteCluster")
+    val logContext = new LogContext(s" [MirrorCoordinator cluster=$remoteCluster] ")
+    val listeners = new ClusterResourceListeners()
+    val addresses: util.List[InetSocketAddress] = ClientUtils.parseAndValidateAddresses(
+      config.getList(HAClusterConfig.BOOTSTRAP_SERVERS_CONFIG),
+      ClientDnsLookup.DEFAULT)
+    val metadata = new ProducerMetadata(
+      config.getLong(HAClusterConfig.RETRY_BACKOFF_MS_CONFIG),
+      config.getLong(HAClusterConfig.METADATA_MAX_AGE_CONFIG),
+      config.getLong(HAClusterConfig.METADATA_MAX_AGE_CONFIG),
+      logContext,
+      listeners,
+      time)
+
+    metadata.bootstrap(addresses)
+
+    val channelBuilder = ClientUtils.createChannelBuilder(config, time, logContext)
+    val selector = new Selector(
+      NetworkReceive.UNLIMITED,
+      config.getLong(HAClusterConfig.CONNECTIONS_MAX_IDLE_MS_CONFIG),
+      metrics,
+      time,
+      "mirror-metadata",
+      Map("remote-cluster-id" -> remoteCluster).asJava,
+      false,
+      channelBuilder,
+      logContext
+    )
+    val kafkaClient = new NetworkClient(
+      selector,
+      metadata,
+      s"mirror-metadata-cluster-$remoteCluster",
+      1,
+      0,
+      0,
+      Selectable.USE_DEFAULT_BUFFER_SIZE,
+      config.getInt(HAClusterConfig.RECEIVE_BUFFER_CONFIG),
+      config.getInt(HAClusterConfig.REQUEST_TIMEOUT_MS_CONFIG),
+      ClientDnsLookup.DEFAULT,
+      time,
+      true,
+      new ApiVersions,
+      logContext
+    )
+    (kafkaClient, metadata)
+  }
+
+  private def getMirrorConfig(remoteCluster: String): HAClusterConfig = {
+    info(s"Get mirror config for cluster $remoteCluster configs ${ClusterConfigManager.getConfigs(remoteCluster)}")
+    val props = new Properties()
+    props ++= ClusterConfigManager.getConfigs(remoteCluster)
+    new HAClusterConfig(props)
+  }
+
+  def updateRemoteTopicMetadata(): Unit = {
+    val nowMs = time.milliseconds()
+    val mirrorTopics = allMirrorTopics()
+    val mirrorTopicsByLocal = allMirrorTopicsByLocal()
+    val hostedMirrorTopics = allHostedMirrorTopics()
+    val unknownMirrorTopics = unknownMirrorTopicLocalNamesNeedMetadata.flatMap(topic => mirrorTopicsByLocal.get(topic))
+
+    //TODO trace
+    trace( s"Begin update remote topics ${hostedMirrorTopics.map(_.remoteTopic).mkString(", ")} metadata.")
+    if (unknownMirrorTopicLocalNames.nonEmpty)
+    info(s"Unknown mirror topics of local topic name ${unknownMirrorTopicLocalNames.mkString(", ")}")
+
+    // 1. maybe init new cluster client
+    val requiresVersion = mutable.HashMap[String, Int]()
+    (hostedMirrorTopics ++ unknownMirrorTopics).map(_.remoteCluster)
+      .filterNot(remoteClients.contains)
+      .foreach {
+        remoteCluster => {
+          val remoteClientAndMetadata = newRemoteClient(remoteCluster, getMirrorConfig(remoteCluster))
+          //向remoteClients添加（remoteCluster，KafkaClient）键值对
+          remoteClients += remoteCluster -> remoteClientAndMetadata._1
+          //向remoteMetadatas添加（remoteCluster，ProducerMetadata）键值对
+          remoteMetadatas += remoteCluster -> remoteClientAndMetadata._2
+          //向remoteMetadatas添加（remoteCluster，updateVersion）键值对
+          requiresVersion += remoteCluster -> remoteClientAndMetadata._2.updateVersion()
+        }
+      }
+    //refresh topic
+    //更新remoteMetadatas中保存的remoteTopic信息
+    //mirrorTopics.values.foreach {
+    hostedMirrorTopics ++ unknownMirrorTopics.foreach {
+      case MirrorTopic(remoteTopic, remoteCluster, _, _, _, _) =>
+        remoteMetadatas.get(remoteCluster).foreach(_.add(remoteTopic, nowMs))
+    }
+
+    // 3. request metadata update
+    // for delay partitons
+    // delayedMakeMirrorPartitions unknown remote topic partition metadata
+    (mirrorFetcherManager.allDelayedPartitions() ++ mirrorFetcherManager.allFailedPartitions() ++
+      delayedMakeMirrorPartitions)
+      .flatMap {
+        tp =>
+          info(s"Request metadata update for delayed remote partition $tp")
+          mirrorTopics.get(tp.topic)
+      }
+      .map(_.remoteCluster)
+      .foreach {
+        remoteCluster: String => {
+          remoteMetadatas.get(remoteCluster).foreach {
+            r => requiresVersion += remoteCluster -> r.requestUpdate()
+          }
+        }
+      }
+
+    // for unknown mirror topic
+    unknownMirrorTopics
+      .map(_.remoteCluster )
+      .foreach {
+        remoteCluster: String => {
+          remoteMetadatas.get(remoteCluster).foreach {
+            r => requiresVersion += remoteCluster -> r.requestUpdate()
+          }
+        }
+      }
+
+    //4. poll send request and receive response
+    remoteClients.values.foreach(_.poll(0, nowMs))
+
+    //5. wait metadata
+    while ((time.milliseconds() - nowMs < 9 * 1000) && requiresVersion.exists {
+      case (remoteCluster, lastVersion) =>
+        info(s"Requested cluster $remoteCluster metadate new version: ${remoteMetadatas(remoteCluster).updateVersion()} last version: $lastVersion")
+        val condition = remoteMetadatas(remoteCluster).updateVersion() <= lastVersion
+        if (condition) {
+          remoteClients(remoteCluster).poll(10, time.milliseconds)
+        }
+        condition
+    }) {
+      time.sleep(100)
+    }
+
+    //TODO trace
+    trace(s"Remote topic metadata ${remoteMetadatas.values.map(_.fetch())}")
+    info(s"All mirror fetcher remote partitions ${mirrorFetcherManager.allPartitions()}")
+    //6. handle state change, maybe change mirror fetcher
+    val partitionsToMakeMirrors = mutable.Set[TopicPartition]()
+    (mirrorFetcherManager.allPartitions() ++ delayedMakeMirrorPartitions)
+      .map(tp => (tp, mirrorTopics.get(tp.topic)))
+      .foreach {
+        case (topicPartition, maybeTopic: Option[MirrorTopic]) => {
+          maybeTopic.map(t =>
+            remoteMetadatas(t.remoteCluster)).map(_.currentLeader(topicPartition)).foreach {
+            // TODO 考虑低版本可能不存在epoch
+            case leaderAndEpoch if leaderAndEpoch.leader.isPresent => {
+              val oldLeaderAndEpoch = remoteLeaderAndEpochs.put(topicPartition, leaderAndEpoch)
+              if (delayedMakeMirrorPartitions.contains(topicPartition)) {
+                //add mirror fetcher
+                info(s"Will add mirror fetcher for delayed remote partition ${topicPartition}")
+                partitionsToMakeMirrors += topicPartition
+              } else if (oldLeaderAndEpoch.isDefined &&
+                (leaderAndEpoch.epoch != oldLeaderAndEpoch.get.epoch || leaderAndEpoch.leader !=
+                  oldLeaderAndEpoch.get.leader)) {
+                //epoch change
+                info(s"Will change mirror fetcher for remote partition ${topicPartition} from ${oldLeaderAndEpoch.get} to ${leaderAndEpoch}")
+                //add mirror fetcher
+                partitionsToMakeMirrors += topicPartition
+              }
+            }
+            case _ => None
+          }
+        }
+      }
+    //7. make mirrors
+    makeMirrors(partitionsToMakeMirrors, localStateChange = false)
+
+    // 8.close idle client
+    val clusters = (hostedMirrorTopics ++ unknownMirrorTopics)
+     .map(_.remoteCluster)
+    remoteClients.filterNot(c => clusters.contains(c._1)).foreach {
+    case (clusterId, client) => {
+      info(s"Close idle cluster $clusterId network client")
+      try client.close()
+      catch {
+        case e: Exception =>
+          error (s"Failed to close cluster $clusterId network client", e)
+      } finally {
+        remoteMetadatas -= clusterId
+        remoteClients -= clusterId
+      }
+    }
+    }
+
+    //TODO trace
+    info(s"Remote topic leader and epochs ${remoteLeaderAndEpochs}")
+  }
+
+  def getPartitionOrExceptionByRemoteTopicPartition(remoteTopicPartition: TopicPartition, expectLeader: Boolean): Partition = {
+    getLocalTopicPartitionByRemoteTopicPartition(remoteTopicPartition) match {
+      case Some(tp) => getPartitionOrException(tp, expectLeader)
+      case None => throw Errors.UNKNOWN_TOPIC_OR_PARTITION.exception(s"Can't find remote partition $remoteTopicPartition")
+    }
+  }
+
+  //通过镜像TopicPartition获取LocalTopicPartition
+  def getLocalTopicPartitionByRemoteTopicPartition(remoteTopicPartition: TopicPartition):
+  Option[TopicPartition] = {
+    mirrorTopics.get(remoteTopicPartition.topic()).map(mt => new TopicPartition(mt.localTopic,
+      remoteTopicPartition.partition()))
+  }
+
+  def allMirrorTopics(): Map[String, MirrorTopic] = {
+    mirrorTopics.toMap
+  }
+
+  def allHostedMirrorTopics(): Set[MirrorTopic] = {
+  (mirrorFetcherManager.allPartitions() ++ delayedMakeMirrorPartitions)
+   .flatMap {
+     tp => mirrorTopics.get(tp.topic)
+   }
+  }
+
+  def allMirrorTopicsByLocal(): Map[String, MirrorTopic] =
+  {
+    mirrorTopicsByLocal.toMap
+  }
+
+  def getUnknownMirrorTopicLocalNames(): Set[String] = {
+    unknownMirrorTopicLocalNames
+  }
+
+  def remoteClusterMetadata(remoteCluster: String): Option[Cluster] = {
+    remoteMetadatas.get(remoteCluster).map(_.fetch())
+  }
+
+  private def delayMakeMirror(partition: TopicPartition): Unit = {
+    info(s"Delay to make mirror for remote partition $partition")
+    inLock(mirrorFetcherLock) {
+      delayedMakeMirrorPartitions.add(partition)
+    }
+  }
+
+  def removeMirrors(partitionsToRemove: Set[TopicPartition], reason: String): Unit =
+    inLock(mirrorFetcherLock) {
+      delayedMakeMirrorPartitions --= partitionsToRemove
+      mirrorFetcherManager.removeFetcherForPartitions(partitionsToRemove)
+
+      remoteLeaderAndEpochs --= partitionsToRemove
+      partitionsToRemove.foreach { topicPartition =>
+        stateChangeLogger.trace(s"Stopped mirror fetchers of " +
+          s"$reason for remote partition $topicPartition")
+      }
+    }
+
+  def makeMirrors(partitionsToMakeMirrors: Set[TopicPartition], localStateChange: Boolean = true): Unit = {
+    //we do not need to check if the leader exists again since this has been done at the beginning of this process
+    val partitionsToMakeMirrorWithLeaderAndOffset = partitionsToMakeMirrors.flatMap { topicPartition =>
+      remoteLeaderAndEpochs.get(topicPartition) match {
+        case Some(leaderAndEpoch) =>
+          //convert to local topic partiton
+          //获取TopicPartition在本地代表的LocalTopic的每个TopicPartition的HW
+          val fetchOffset =
+            if (topicPartition.topic().equals(Topic.GROUP_METADATA_TOPIC_NAME) )
+              // 当远程leader发生切换时，继续使用之前的fetchOffset
+            // epoch order will markPartitionFailed and remove from fetchState
+
+            //mirrorFetcherManager.getFetcher(topicPartition).flatMap(_.fetchStatel topicPartition) ).map(.fetchOffset).getOrElse(0L)
+              mirrorFetcherManager.latestFetchOffset(topicPartition).getOrElse(0L)
+            else
+              getPartitionOrExceptionByRemoteTopicPartition(topicPartition, expectLeader =
+                true).localLogOrException.highWatermark
+          //获取分区leader(包括id、host、port等信息)
+          val leader = leaderAndEpoch.leader.get()
+          val remoteLeader = BrokerEndPoint(leader.id(), leader.host(), leader.port())
+          //配置bootstrap.servers即集群信息
+          remoteLeader.remoteCluster = Option(mirrorTopics(topicPartition.topic).remoteCluster)
+          remoteLeader.mirrorConfig = Option(getMirrorConfig(remoteLeader.remoteCluster.get))
+          Option(topicPartition -> InitialFetchState(remoteLeader, leaderAndEpoch.epoch.orElse(-1),
+            fetchOffset))
+        case None =>
+          delayMakeMirror(topicPartition)
+          None
+      }
+    }.toMap
+
+    inLock(mirrorFetcherLock) {
+      //check mirrors, maybe removed during the process of metadata, and must before remove fetchers
+      val allMirrorPartitions = mirrorFetcherManager.allPartitions() ++ delayedMakeMirrorPartitions
+      val partitionsToMakeMirrorWithLeaderAndOffsetWithCheck = partitionsToMakeMirrorWithLeaderAndOffset.filter(t => allMirrorPartitions.contains(t._1))
+      //first remove fetcher
+      mirrorFetcherManager.removeFetcherForPartitions(partitionsToMakeMirrors)
+      partitionsToMakeMirrors.foreach { topicPartition =>
+        stateChangeLogger.trace(s"Stopped mirror fetchers of " +
+          s"${if (localStateChange) "local state change to" else "remote state change to"} " +
+          s"become Leader for remote partition $topicPartition")
+      }
+      //add fetcher
+      mirrorFetcherManager.addFetcherForPartitions(partitionsToMakeMirrorWithLeaderAndOffsetWithCheck)
+      delayedMakeMirrorPartitions --= partitionsToMakeMirrorWithLeaderAndOffsetWithCheck.keySet
+      partitionsToMakeMirrorWithLeaderAndOffsetWithCheck.foreach { case (partition, initialFetchState) =>
+        stateChangeLogger.trace(s"Started mirror fetchers of " +
+          s"${if (localStateChange) "local state change to" else "remote state change to"} " +
+          s"become leader for remote partition $partition with leader ${initialFetchState.leader} and epoch ${initialFetchState.currentLeaderEpoch}")
+      }
+    }
+  }
+
+  def addMirrorTopics(mirrorTopic: MirrorTopic): Unit = {
+    info(s"Add a mirror topic $mirrorTopic" )
+    mirrorTopics.put(mirrorTopic.remoteTopic, mirrorTopic)
+    mirrorTopicsByLocal.put(mirrorTopic.localTopic, mirrorTopic)
+    makeMirrors(
+      nonOfflinePartitionsIterator
+        .filter(tp => tp.isLeader && tp.topic.equals(mirrorTopic.localTopic))
+        .map(tp => new TopicPartition(mirrorTopic.remoteTopic, tp.partitionId)).toSet,
+      localStateChange = false
+    )
+    if (!metadataCache.contains(mirrorTopic.localTopic)) {
+      unknownMirrorTopicLocalNames.add(mirrorTopic.localTopic)
+    }
+  }
+
+  def removeMirrorTopics(remoteTopic: String): Unit = {
+    info(s"Remove a mirror topic ${mirrorTopics.get(remoteTopic)} by remote topic $remoteTopic")
+    removeMirrors(
+      (mirrorFetcherManager.allPartitions() ++ delayedMakeMirrorPartitions).filter(
+        p => mirrorTopics.contains(p.topic()) && p.topic().equals(remoteTopic)),
+      "remote state change to stop mirror"
+    )
+    mirrorTopics.remove(remoteTopic).foreach {
+      mt => {
+        mirrorTopicsByLocal.remove(mt.localTopic)
+        unknownMirrorTopicLocalNamesNeedMetadata.remove(mt.localTopic)
+        unknownMirrorTopicLocalNames.remove(mt.localTopic)
+      }
+    }
+  }
+
+  //本地元数据更新删除未知topic
+  private def removeUnknownLocalMirrorTopic(localTopic: String): Unit = {
+    info(s"Local mirror topic $localTopic has bean created, remove it from unknown list")
+    unknownMirrorTopicLocalNamesNeedMetadata.remove(localTopic)
+    unknownMirrorTopicLocalNames.remove(localTopic)
+  }
+
+  private class RemoteMetadataThread(name: String, period: Long, unit: TimeUnit) extends
+    ShutdownableThread(name) {
+    def backoff(): Unit = pause(period, unit)
+
+    override def doWork(): Unit = {
+      try {
+        updateRemoteTopicMetadata()
+      } catch {
+        case e: Throwable =>
+          if (isRunning)
+            error("Error due to", e)
+      } finally {
+        backoff()
+      }
+    }
+  }
+
+//  addMirrorTopics(MirrorTopic("lee_remote_topic_0", "9092", "lee_remote_topic_0", syncTopicPartitions =
+//    true))
+//  addMirrorTopics(MirrorTopic("lee_remote_topic_1", "9092", "lee_remote_topic_1", syncTopicPartitions =
+//    true))
+//  addMirrorTopics(MirrorTopic("lee_remote_topic_2", "9092", "lee_remote_topic_2", syncTopicPartitions =
+//    true))
 }
+
+case class MirrorTopic(remoteTopic: String,
+                       remoteCluster: String,
+                       localTopic: String,
+                       syncTopicPartitions: Boolean = false,
+                       syncTopicConfigs: Boolean = false,
+                       syncTopicAcls: Boolean = false)

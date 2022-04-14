@@ -999,7 +999,8 @@ class Log(@volatile var dir: File,
                      leaderEpoch: Int,
                      origin: AppendOrigin = AppendOrigin.Client,
                      interBrokerProtocolVersion: ApiVersion = ApiVersion.latestVersion): LogAppendInfo = {
-    append(records, origin, interBrokerProtocolVersion, assignOffsets = true, leaderEpoch)
+    //append(records, origin, interBrokerProtocolVersion, assignOffsets = true, leaderEpoch)
+    append(records, origin, interBrokerProtocolVersion, assignOffsets = origin != AppendOrigin.Mirror, leaderEpoch)
   }
 
   /**
@@ -1126,6 +1127,11 @@ class Log(@volatile var dir: File,
         // update the epoch cache with the epoch stamped onto the message by the leader
         validRecords.batches.asScala.foreach { batch =>
           if (batch.magic >= RecordBatch.MAGIC_VALUE_V2) {
+            // mirror topic rewrite leaderEpoch
+            if (origin == AppendOrigin.Mirror) {
+              batch.setPartitionLeaderEpoch(leaderEpoch)
+            }
+
             maybeAssignEpochStartOffset(batch.partitionLeaderEpoch, batch.baseOffset)
           } else {
             // In partial upgrade scenarios, we may get a temporary regression to the message format. In

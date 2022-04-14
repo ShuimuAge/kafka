@@ -17,6 +17,7 @@
 package kafka.zk
 
 import java.util.Properties
+import org.apache.kafka.common.config.manager.{ClusterConfigManager, TopicConfigManager, UserConfigManager}
 
 import kafka.admin.{AdminOperationException, AdminUtils, BrokerMetadata, RackAwareMode}
 import kafka.common.TopicAlreadyMarkedForDeletionException
@@ -278,6 +279,7 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
       case ConfigType.Client => changeClientIdConfig(entityName, configs)
       case ConfigType.User => changeUserOrUserClientIdConfig(entityName, configs)
       case ConfigType.Broker => changeBrokerConfig(parseBroker(entityName), configs)
+      case ConfigType.HACluster => changeClusterConfig(entityName, configs)
       case _ => throw new IllegalArgumentException(s"$entityType is not a known entityType. Should be one of ${ConfigType.Topic}, ${ConfigType.Client}, ${ConfigType.Broker}")
     }
   }
@@ -376,6 +378,42 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
     DynamicConfig.Broker.validate(configs)
   }
 
+  /**
+   * Update the config for an existing cluster and create a change notification
+   *
+   * @param cluster  : The cluster for which configs are being changed
+   * @param configs  : The final set of configs that will be applied to the topic. If any new configs need to
+   *                                be added or existing configs need to be deleted, it should be done prior to invoking this API
+   * */
+  def changeClusterConfig(cluster: String, configs: Properties): Unit = {
+    validateClusterConfig(configs)
+    changeEntityConfig(ConfigType.HACluster, cluster, configs)
+  }
+
+  def validateClusterConfig( configs: Properties): Unit = {
+    ClusterConfigManager.validateConfigs(configs)
+  }
+
+  /**
+  *  Throw an exception while deleting configs for a cluster which is linked with topics or users
+  *
+  * @param cluster: The cluster for which configs are being deleted
+  */
+  def validClusterConfigsDeletable(cluster: String): Unit = {
+    val allTopicConfigs = getAllTopicConfigs()
+    for (topic <- allTopicConfigs.keys) {
+      val topicConfigs = allTopicConfigs.get(topic).get
+      if (TopicConfigManager.ifConfigsClusterRelated(topicConfigs, cluster))
+        throw new IllegalArgumentException(s"error : Topic ${topic} still contains configs about Cluster ${cluster}")
+    }
+    val allUserConfigs = getAllUserConfigs()
+    for (user <- allUserConfigs.keys) {
+      val userConfigs = allUserConfigs.get(user).get
+      if (UserConfigManager.ifConfigsClusterRelated(userConfigs, cluster))
+        throw new IllegalArgumentException(s"error : User ${user} still contains configs about Cluster ${cluster}")
+    }
+  }
+
   private def changeEntityConfig(rootEntityType: String, fullSanitizedEntityName: String, configs: Properties): Unit = {
     val sanitizedEntityPath = rootEntityType + '/' + fullSanitizedEntityName
     zkClient.setOrCreateEntityConfigs(rootEntityType, fullSanitizedEntityName, configs)
@@ -401,6 +439,12 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
    */
   def getAllTopicConfigs(): Map[String, Properties] =
     zkClient.getAllTopicsInCluster.map(topic => (topic, fetchEntityConfig(ConfigType.Topic, topic))).toMap
+
+  /**
+   * Gets all user configs
+   * @return
+   */
+  def getAllUserConfigs(): Map[String, Properties] = zkClient.getAllConfiguredUsers.map(user => (user, fetchEntityConfig(ConfigType.User, user))).toMap
 
   /**
    * Gets all the entity configs for a given entityType

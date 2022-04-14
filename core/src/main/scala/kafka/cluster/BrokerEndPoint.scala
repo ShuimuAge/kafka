@@ -17,8 +17,8 @@
 package kafka.cluster
 
 import java.nio.ByteBuffer
-
 import kafka.api.ApiUtils._
+import kafka.ssy.datachannel.HAClusterConfig
 import org.apache.kafka.common.KafkaException
 import org.apache.kafka.common.utils.Utils._
 
@@ -63,6 +63,10 @@ object BrokerEndPoint {
  * This allows us to keep the wire protocol with the clients unchanged where the protocol is not needed.
  */
 case class BrokerEndPoint(id: Int, host: String, port: Int) {
+
+  // mirror cluster id
+  var remoteCluster: Option[String] = None
+  var mirrorConfig: Option[HAClusterConfig] = None
 
   def connectionString(): String = formatAddress(host, port)
 

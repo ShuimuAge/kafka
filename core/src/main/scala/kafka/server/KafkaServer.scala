@@ -17,6 +17,7 @@
 
 package kafka.server
 
+import org.apache.kafka.common.config.manager.{ClusterConfigManager, TopicConfigManager, UserConfigManager}
 import java.io.{File, IOException}
 import java.net.{InetAddress, SocketTimeoutException}
 import java.util
@@ -28,6 +29,7 @@ import kafka.cluster.Broker
 import kafka.common.{GenerateBrokerIdException, InconsistentBrokerIdException, InconsistentBrokerMetadataException, InconsistentClusterIdException}
 import kafka.controller.KafkaController
 import kafka.coordinator.group.GroupCoordinator
+import kafka.coordinator.mirror.MirrorCoordinator
 import kafka.coordinator.transaction.TransactionCoordinator
 import kafka.log.{LogConfig, LogManager}
 import kafka.metrics.{KafkaMetricsGroup, KafkaMetricsReporter}
@@ -133,6 +135,8 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
 
   private var logContext: LogContext = null
 
+  private var topicConfigManager: TopicConfigManager = null
+
   var metrics: Metrics = null
 
   val brokerState: BrokerState = new BrokerState
@@ -160,6 +164,8 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
   var groupCoordinator: GroupCoordinator = null
 
   var transactionCoordinator: TransactionCoordinator = null
+
+  var mirrorCoordinator: MirrorCoordinator = null
 
   var kafkaController: KafkaController = null
 
@@ -290,10 +296,16 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         groupCoordinator = GroupCoordinator(config, zkClient, replicaManager, Time.SYSTEM, metrics)
         groupCoordinator.startup()
 
+        // Mirror
+        replicaManager.mirrorFetcherManager.setGroupMetadataManager(groupCoordinator.groupManager)
+
         /* start transaction coordinator, with a separate background thread scheduler for transaction expiration and log loading */
         // Hardcode Time.SYSTEM for now as some Streams tests fail otherwise, it would be good to fix the underlying issue
         transactionCoordinator = TransactionCoordinator(config, replicaManager, new KafkaScheduler(threads = 1, threadNamePrefix = "transaction-log-manager-"), zkClient, metrics, metadataCache, Time.SYSTEM)
         transactionCoordinator.startup()
+
+        mirrorCoordinator = new MirrorCoordinator(config, metrics, Time.SYSTEM, replicaManager, adminManager, zkClient)
+        mirrorCoordinator.startup()
 
         /* Get the authorizer and initialize it if one is specified.*/
         authorizer = config.authorizer
@@ -312,7 +324,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         /* start processing requests */
         dataPlaneRequestProcessor = new KafkaApis(socketServer.dataPlaneRequestChannel, replicaManager, adminManager, groupCoordinator, transactionCoordinator,
           kafkaController, zkClient, config.brokerId, config, metadataCache, metrics, authorizer, quotaManagers,
-          fetchManager, brokerTopicStats, clusterId, time, tokenManager)
+          fetchManager, brokerTopicStats, clusterId, time, tokenManager, Some(mirrorCoordinator))
 
         dataPlaneRequestHandlerPool = new KafkaRequestHandlerPool(config.brokerId, socketServer.dataPlaneRequestChannel, dataPlaneRequestProcessor, time,
           config.numIoThreads, s"${SocketServer.DataPlaneMetricPrefix}RequestHandlerAvgIdlePercent", SocketServer.DataPlaneThreadPrefix)
@@ -320,7 +332,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         socketServer.controlPlaneRequestChannelOpt.foreach { controlPlaneRequestChannel =>
           controlPlaneRequestProcessor = new KafkaApis(controlPlaneRequestChannel, replicaManager, adminManager, groupCoordinator, transactionCoordinator,
             kafkaController, zkClient, config.brokerId, config, metadataCache, metrics, authorizer, quotaManagers,
-            fetchManager, brokerTopicStats, clusterId, time, tokenManager)
+            fetchManager, brokerTopicStats, clusterId, time, tokenManager, Some(mirrorCoordinator))
 
           controlPlaneRequestHandlerPool = new KafkaRequestHandlerPool(config.brokerId, socketServer.controlPlaneRequestChannelOpt.get, controlPlaneRequestProcessor, time,
             1, s"${SocketServer.ControlPlaneMetricPrefix}RequestHandlerAvgIdlePercent", SocketServer.ControlPlaneThreadPrefix)
@@ -331,11 +343,14 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         /* Add all reconfigurables for config change notification before starting config handlers */
         config.dynamicConfig.addReconfigurables(this)
 
+        topicConfigManager = new TopicConfigManager(replicaManager)
+
         /* start dynamic config manager */
-        dynamicConfigHandlers = Map[String, ConfigHandler](ConfigType.Topic -> new TopicConfigHandler(logManager, config, quotaManagers, kafkaController),
+        dynamicConfigHandlers = Map[String, ConfigHandler](ConfigType.Topic -> new TopicConfigHandler(logManager, config, quotaManagers, kafkaController, topicConfigManager),
                                                            ConfigType.Client -> new ClientIdConfigHandler(quotaManagers),
                                                            ConfigType.User -> new UserConfigHandler(quotaManagers, credentialProvider),
-                                                           ConfigType.Broker -> new BrokerConfigHandler(config, quotaManagers))
+                                                           ConfigType.Broker -> new BrokerConfigHandler(config, quotaManagers),
+                                                           ConfigType.HACluster -> new ClusterConfigHandler())
 
         // Create the config manager. start listening to notifications
         dynamicConfigManager = new DynamicConfigManager(zkClient, dynamicConfigHandlers)
@@ -634,6 +649,8 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
           CoreUtils.swallow(transactionCoordinator.shutdown(), this)
         if (groupCoordinator != null)
           CoreUtils.swallow(groupCoordinator.shutdown(), this)
+        if (mirrorCoordinator != null)
+          CoreUtils.swallow(mirrorCoordinator.shutdown(), this )
 
         if (tokenManager != null)
           CoreUtils.swallow(tokenManager.shutdown(), this)

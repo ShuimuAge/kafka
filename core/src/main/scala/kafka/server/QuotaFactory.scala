@@ -29,6 +29,8 @@ object QuotaType  {
   case object Request extends QuotaType
   case object LeaderReplication extends QuotaType
   case object FollowerReplication extends QuotaType
+  case object LeaderMirror extends QuotaType
+  case object FollowerMirror extends QuotaType
   case object AlterLogDirsReplication extends QuotaType
 }
 sealed trait QuotaType
@@ -46,6 +48,8 @@ object QuotaFactory extends Logging {
                            request: ClientRequestQuotaManager,
                            leader: ReplicationQuotaManager,
                            follower: ReplicationQuotaManager,
+                           mirrorLeader: ReplicationQuotaManager,
+                           mirrorFollower: ReplicationQuotaManager,
                            alterLogDirs: ReplicationQuotaManager,
                            clientQuotaCallback: Option[ClientQuotaCallback]) {
     def shutdown(): Unit = {
@@ -66,6 +70,8 @@ object QuotaFactory extends Logging {
       new ClientRequestQuotaManager(clientRequestConfig(cfg), metrics, time, threadNamePrefix, clientQuotaCallback),
       new ReplicationQuotaManager(replicationConfig(cfg), metrics, LeaderReplication, time),
       new ReplicationQuotaManager(replicationConfig(cfg), metrics, FollowerReplication, time),
+      new ReplicationQuotaManager(replicationConfig(cfg), metrics, LeaderMirror, time),
+      new ReplicationQuotaManager(replicationConfig(cfg), metrics, FollowerMirror, time),
       new ReplicationQuotaManager(alterLogDirsReplicationConfig(cfg), metrics, AlterLogDirsReplication, time),
       clientQuotaCallback
     )

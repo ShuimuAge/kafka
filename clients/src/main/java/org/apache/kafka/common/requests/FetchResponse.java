@@ -69,6 +69,7 @@ import static org.apache.kafka.common.requests.FetchMetadata.INVALID_SESSION_ID;
  *     not supported by the fetch request version
  * - {@link Errors#UNKNOWN_SERVER_ERROR} For any unexpected errors
  */
+//follower副本向leader副本拉取数据时，leader副本返回follower的响应
 public class FetchResponse<T extends BaseRecords> extends AbstractResponse {
 
     private static final String RESPONSES_KEY_NAME = "responses";
@@ -77,6 +78,7 @@ public class FetchResponse<T extends BaseRecords> extends AbstractResponse {
     private static final String PARTITIONS_KEY_NAME = "partition_responses";
 
     // partition level fields
+    //leader副本返回follower响应时带上自己的HW
     private static final Field.Int64 HIGH_WATERMARK = new Field.Int64("high_watermark",
             "Last committed offset.");
     private static final Field.Int64 LOG_START_OFFSET = new Field.Int64("log_start_offset",

@@ -338,6 +338,19 @@ class MetadataCache(brokerId: Int) extends Logging {
     }
   }
 
+  def getNumberOfPartition(topic: String): (Int, Int) = {
+    //给partitionMetadataLock加读锁
+    inReadLock(partitionMetadataLock) {
+      val allPartitionState = metadataSnapshot.partitionStates.get(topic)
+      if (allPartitionState.nonEmpty) {
+        val totalPartition = allPartitionState.get.size
+        val partitionOnbroker = allPartitionState.get.values.count(_.leader() == brokerId)
+        (partitionOnbroker, totalPartition)
+      } else
+        (0, 0)
+    }
+  }
+  
   case class MetadataSnapshot(partitionStates: mutable.AnyRefMap[String, mutable.LongMap[UpdateMetadataPartitionState]],
                               controllerId: Option[Int],
                               aliveBrokers: mutable.LongMap[Broker],
