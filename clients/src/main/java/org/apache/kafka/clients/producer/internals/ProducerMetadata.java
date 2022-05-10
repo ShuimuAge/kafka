@@ -32,12 +32,16 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+//Kafka集群元数据 - Producer版
+//该Metadata对象会被主线程和Sender线程共享, 当metadata不包含我们所需要的数据时会发送 MetadataRequest 来同步数据。
 public class ProducerMetadata extends Metadata {
     // If a topic hasn't been accessed for this many milliseconds, it is removed from the cache.
     private final long metadataIdleMs;
 
     /* Topics with expiry time */
+    //存储 topic名 -> topic超时时间戳 映射
     private final Map<String, Long> topics = new HashMap<>();
+    //存储待添加的新Topics
     private final Set<String> newTopics = new HashSet<>();
     private final Logger log;
     private final Time time;
@@ -64,14 +68,20 @@ public class ProducerMetadata extends Metadata {
         return new MetadataRequest.Builder(new ArrayList<>(newTopics), true);
     }
 
+    // 向集群元数据添加主题
     public synchronized void add(String topic, long nowMs) {
         Objects.requireNonNull(topic, "topic cannot be null");
+        //若是第一次添加该topic到topics
         if (topics.put(topic, nowMs + metadataIdleMs) == null) {
             newTopics.add(topic);
+            //更新topic列表
             requestUpdateForNewTopics();
         }
     }
 
+    //根据该Topic是不是新加入集群的topic采取更新集群元数据策略
+    //将 metadata 的 needUpdate 变量设置为 true（强制更新），
+    // 并返回当前的版本号（version），通过版本号来判断 metadata 是否完成更新；
     public synchronized int requestUpdateForTopic(String topic) {
         if (newTopics.contains(topic)) {
             return requestUpdateForNewTopics();
@@ -113,6 +123,7 @@ public class ProducerMetadata extends Metadata {
     /**
      * Wait for metadata update until the current version is larger than the last version we know of
      */
+    // 更新 metadata 信息（根据当前 version 值来判断）
     public synchronized void awaitUpdate(final int lastVersion, final long timeoutMs) throws InterruptedException {
         long currentTimeMs = time.milliseconds();
         long deadlineMs = currentTimeMs + timeoutMs < 0 ? Long.MAX_VALUE : currentTimeMs + timeoutMs;

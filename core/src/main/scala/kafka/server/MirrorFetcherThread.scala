@@ -22,12 +22,19 @@ import scala.collection.JavaConverters._
 import scala.collection.{Map, Set, mutable}
 
 /**
+ * TODO Didi-Kafka 灾备
  * @author leewe i
  * @date 2021/9/28
+ *
+ * 拉取远程Topic数据，调用appendToLocalLog partition.appendRecordsToLeader写入本地
+ *
+ * 1. 以副本方式拉取远端数据
+ * 2. 保持原有Offset写入本地Leader(LeaderEpoch使用本地值)
+ * 3. 处理本地Topic leader发生切换(远程元数据未获取到则做delay处理)
  */
 class MirrorFetcherThread(name: String,
-                          fetcherId: Int,
-                          sourceBroker: BrokerEndPoint,
+                          fetcherId: Int,                                                      //fetcherId
+                          sourceBroker: BrokerEndPoint,                                        //源broker
                           config: HAClusterConfig,
                           failedPartitions: FailedPartitions,
                           partitionLatestFetchOffsets: mutable.HashMap[TopicPartition, Long],
@@ -39,7 +46,7 @@ class MirrorFetcherThread(name: String,
                           leaderEndpointBlockingSend: Option[BlockingSend] = None,
                           interBrokerProtocolVersion: ApiVersion,
                           brokerId: Int,
-                          clusterId: String)
+                          clusterId: String)                                                    //本地集群名
   extends AbstractFetcherThread(name = name,
     clientId = name,
     sourceBroker = sourceBroker,
@@ -52,7 +59,7 @@ class MirrorFetcherThread(name: String,
     FetchRequest.CONSUMER_REPLICA_ID
   private val logContext = new LogContext(s"[MirrorFetcher replicaId=$replicaId, " +
                                           s"local clusterId=$clusterId, " +
-                                          s" remote clusterId=${sourceBroker.remoteCluster.get}, " +
+                                          s"remote clusterId=${sourceBroker.remoteCluster.get}, " +
                                           s"leaderId=${sourceBroker.id}, " +
                                           s"fetcherId=$fetcherId] ")
   this.logIdent = logContext.logPrefix

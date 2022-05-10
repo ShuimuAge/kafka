@@ -40,22 +40,31 @@ import java.util.concurrent.atomic.AtomicInteger;
  * A {@link Records} implementation backed by a file. An optional start and end position can be applied to this
  * instance to enable slicing a range of the log records.
  */
+//FileRecords 就是实际保存 Kafka 消息的对象，封装了真正的java.io.File对象。
+// baseOffset是每个日志段对象保存自己的起始位移，即.log文件的命名，
+// 每个 LogSegment 对象实例一旦被创建，它的起始位移就是固定的了，不能再被更改。
 public class FileRecords extends AbstractRecords implements Closeable {
+    /** 标识是否为日志文件分片 */
     private final boolean isSlice;
     private final int start;
+    /** 分片的结束位置 */
     private final int end;
 
     private final Iterable<FileLogInputStream.FileChannelRecordBatch> batches;
 
     // mutable state
+    /** 如果是分片则表示分片的大小（end - start），如果不是分片则表示整个日志文件的大小 */
     private final AtomicInteger size;
+    /** 读写对应的日志文件的通道 */
     private final FileChannel channel;
+    /** 日志文件对象 */
     private volatile File file;
 
     /**
      * The {@code FileRecords.open} methods should be used instead of this constructor whenever possible.
      * The constructor is visible for tests.
      */
+    // FileRecords 类用于描述和管理日志（分片）文件数据，对应一个 log 文件，其字段定义如下：
     FileRecords(File file,
                 FileChannel channel,
                 int start,
@@ -240,11 +249,14 @@ public class FileRecords extends AbstractRecords implements Closeable {
      * @param targetSize The size to truncate to. Must be between 0 and sizeInBytes.
      * @return The number of bytes truncated off
      */
+    //执行消息日志索引文件截断
     public int truncateTo(int targetSize) throws IOException {
         int originalSize = sizeInBytes();
+        // 要截断的目标大小不能超过当前文件的大小
         if (targetSize > originalSize || targetSize < 0)
             throw new KafkaException("Attempt to truncate log segment " + file + " to " + targetSize + " bytes failed, " +
                     " size of this log segment is " + originalSize + " bytes.");
+        //如果目标大小小于当前文件大小，那么执行截断
         if (targetSize < (int) channel.size()) {
             channel.truncate(targetSize);
             size.set(targetSize);
@@ -302,6 +314,7 @@ public class FileRecords extends AbstractRecords implements Closeable {
         for (FileChannelRecordBatch batch : batchesFrom(startingPosition)) {
             long offset = batch.lastOffset();
             if (offset >= targetOffset)
+                // 找到第一个batch含有targetOffset的，传入的offset值后面没有用到，主要是用batch.position，代表这个index对应的块的起始位置
                 return new LogOffsetPosition(offset, batch.position(), batch.sizeInBytes());
         }
         return null;

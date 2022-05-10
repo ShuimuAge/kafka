@@ -29,24 +29,25 @@ import java.util.Optional;
  * a partition number from which the record is being received, an offset that points 
  * to the record in a Kafka partition, and a timestamp as marked by the corresponding ProducerRecord.
  */
+//消费者拉取到的每条消息的类型
 public class ConsumerRecord<K, V> {
     public static final long NO_TIMESTAMP = RecordBatch.NO_TIMESTAMP;
     public static final int NULL_SIZE = -1;
     public static final int NULL_CHECKSUM = -1;
 
-    private final String topic;
-    private final int partition;
-    private final long offset;
-    private final long timestamp;
-    private final TimestampType timestampType;
-    private final int serializedKeySize;
-    private final int serializedValueSize;
-    private final Headers headers;
-    private final K key;
-    private final V value;
+    private final String topic;                     //消息所属的topic
+    private final int partition;                    //消息所属的partition
+    private final long offset;                      //消息在所属partition的偏移量
+    private final long timestamp;                   //时间戳
+    private final TimestampType timestampType;      //时间戳类型
+    private final int serializedKeySize;            //消息的key经过序列化后的大小
+    private final int serializedValueSize;          //消息的value经过序列化后的大小
+    private final Headers headers;                  //消息的头部
+    private final K key;                            //消息的key
+    private final V value;                          //消息的value，即一般业务要读取的值
     private final Optional<Integer> leaderEpoch;
 
-    private volatile Long checksum;
+    private volatile Long checksum;                 //校验码
 
     /**
      * Creates a record to be received from a specified topic and partition (provided for

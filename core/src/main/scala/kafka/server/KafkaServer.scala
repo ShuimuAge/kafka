@@ -125,10 +125,22 @@ object KafkaServer {
  */
 class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNamePrefix: Option[String] = None,
                   kafkaMetricsReporters: Seq[KafkaMetricsReporter] = List()) extends Logging with KafkaMetricsGroup {
+  // KafkaServer状态标识：
+  //  1.已启动
+  //  2.是否关闭
+  //  3.是否正在启动
+  // 用原子方式进行读和写的布尔值定义
+  // AtomicBoolean是Java.util.concurrent.atomic包下的原子变量，这个包里面提供了一组原子类。
+  // 其基本的特性就是在多线程环境下，当有多个线程同时执行这些类的实例包含的方法时，具有排他性，
+  // 即当某个线程进入方法，执行其中的指令时，不会被其他线程打断，而别的线程就像自旋锁一样，
+  // 一直等到该方法执行完成，才由JVM从等待队列中选择一个另一个线程进入，这只是一种逻辑上的理解。
+  // 实际上是借助硬件的相关指令来实现的，不会阻塞线程(或者说只是在硬件级别上阻塞了)。
   private val startupComplete = new AtomicBoolean(false)
   private val isShuttingDown = new AtomicBoolean(false)
   private val isStartingUp = new AtomicBoolean(false)
 
+  // CountDownLatch是同步工具类之一，可以指定一个计数值，在并发环境下由线程进行减1操作，
+  // 当计数值变为0之后，被await方法阻塞的线程将会唤醒，实现线程间的同步。
   private var shutdownLatch = new CountDownLatch(1)
 
   private val jmxPrefix: String = "kafka.server"
@@ -165,6 +177,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
 
   var transactionCoordinator: TransactionCoordinator = null
 
+  //Didi-Kafka 灾备 1
   var mirrorCoordinator: MirrorCoordinator = null
 
   var kafkaController: KafkaController = null
@@ -202,6 +215,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
     try {
       info("starting")
 
+      // 如果脚本再次在本机启动这个类，报错
       if (isShuttingDown.get)
         throw new IllegalStateException("Kafka server is still shutting down, cannot re-start!")
 
@@ -213,9 +227,11 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         brokerState.newState(Starting)
 
         /* setup zookeeper */
+        // 启动 broker 第一步就是 初始化 zk client
         initZkClient(time)
 
         /* Get or create cluster_id */
+        // 获取 cluser id， 包装 n 层 直到配置文件 /cluster/id
         _clusterId = getOrGenerateClusterId(zkClient)
         info(s"Cluster ID = $clusterId")
 
@@ -229,15 +245,18 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
             s"The broker is trying to join the wrong cluster. Configured zookeeper.connect may be wrong.")
 
         /* generate brokerId */
+        // 获取 broker id
         config.brokerId = getOrGenerateBrokerId(preloadedBrokerMetadataCheckpoint)
         logContext = new LogContext(s"[KafkaServer id=${config.brokerId}] ")
         this.logIdent = logContext.logPrefix
 
         // initialize dynamic broker configs from ZooKeeper. Any updates made after this will be
         // applied after DynamicConfigManager starts.
+        // Kafka 支持动态修改 config （都存 zk 上）
         config.dynamicConfig.initialize(zkClient)
 
         /* start scheduler */
+        // 启动调度器
         kafkaScheduler = new KafkaScheduler(config.backgroundThreads)
         kafkaScheduler.startup()
 
@@ -256,6 +275,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         logDirFailureChannel = new LogDirFailureChannel(config.logDirs.size)
 
         /* start log manager */
+        // 启动 Log Manager
         logManager = LogManager(config, initialOfflineDirs, zkClient, brokerState, kafkaScheduler, time, brokerTopicStats, logDirFailureChannel)
         logManager.startup()
 
@@ -268,13 +288,17 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         // Create and start the socket server acceptor threads so that the bound port is known.
         // Delay starting processors until the end of the initialization sequence to ensure
         // that credentials have been loaded before processing authentications.
+        // 启动socket server，准备对外服务了! 默认9092端口， 在启动前面的内部类后对外服务
         socketServer = new SocketServer(config, metrics, time, credentialProvider)
         socketServer.startup(startupProcessors = false)
 
         /* start replica manager */
+        // 副本管理
         replicaManager = createReplicaManager(isShuttingDown)
         replicaManager.startup()
 
+        // 将broker 相关信息注册到 zk 上，包括：host:port 和防止 controller 脑裂的 epoch
+        // 到这一步，真正注册 到 /broker/ids 算是加入到集群中了
         val brokerInfo = createBrokerInfo
         val brokerEpoch = zkClient.registerBroker(brokerInfo)
 
@@ -286,6 +310,8 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         tokenManager.startup()
 
         /* start kafka controller */
+        // 启动 controller
+        //Kafka 的每台 Broker 在启动过程中，都会启动 Controller 服务
         kafkaController = new KafkaController(config, zkClient, time, metrics, brokerInfo, brokerEpoch, tokenManager, threadNamePrefix)
         kafkaController.startup()
 
@@ -293,10 +319,11 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
 
         /* start group coordinator */
         // Hardcode Time.SYSTEM for now as some Streams tests fail otherwise, it would be good to fix the underlying issue
+        //启动 GroupCoordinator 服务
         groupCoordinator = GroupCoordinator(config, zkClient, replicaManager, Time.SYSTEM, metrics)
         groupCoordinator.startup()
 
-        // Mirror
+        // Didi-Kafka 灾备
         replicaManager.mirrorFetcherManager.setGroupMetadataManager(groupCoordinator.groupManager)
 
         /* start transaction coordinator, with a separate background thread scheduler for transaction expiration and log loading */
@@ -304,7 +331,10 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         transactionCoordinator = TransactionCoordinator(config, replicaManager, new KafkaScheduler(threads = 1, threadNamePrefix = "transaction-log-manager-"), zkClient, metrics, metadataCache, Time.SYSTEM)
         transactionCoordinator.startup()
 
+        //Didi-Kafka 灾备 1
+        /** 初始化并启动MirrorCoordinator */
         mirrorCoordinator = new MirrorCoordinator(config, metrics, Time.SYSTEM, replicaManager, adminManager, zkClient)
+        /** TODO-ssy 循环执行MirrorTopic检查任务：当本broker上存在镜像集群某Topic配置的MirrorTopic的0分区的leader副本时，保证自己的Topic存在且partitions数和对方相等 */
         mirrorCoordinator.startup()
 
         /* Get the authorizer and initialize it if one is specified.*/
@@ -322,13 +352,17 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
             KafkaServer.MIN_INCREMENTAL_FETCH_SESSION_EVICTION_MS))
 
         /* start processing requests */
+        // Didi-Kafka 灾备 1 添加Some(mirrorCoordinator)
+        // 初始化KafkaApis进行真正的业务逻辑处理
         dataPlaneRequestProcessor = new KafkaApis(socketServer.dataPlaneRequestChannel, replicaManager, adminManager, groupCoordinator, transactionCoordinator,
           kafkaController, zkClient, config.brokerId, config, metadataCache, metrics, authorizer, quotaManagers,
           fetchManager, brokerTopicStats, clusterId, time, tokenManager, Some(mirrorCoordinator))
 
+        // 创建KafkaRequestHandler线程池，其中KafkaRequestHandler主要用来从请求通道中取请求
         dataPlaneRequestHandlerPool = new KafkaRequestHandlerPool(config.brokerId, socketServer.dataPlaneRequestChannel, dataPlaneRequestProcessor, time,
           config.numIoThreads, s"${SocketServer.DataPlaneMetricPrefix}RequestHandlerAvgIdlePercent", SocketServer.DataPlaneThreadPrefix)
 
+        //Didi-Kafka 灾备 1 添加Some(mirrorCoordinator)
         socketServer.controlPlaneRequestChannelOpt.foreach { controlPlaneRequestChannel =>
           controlPlaneRequestProcessor = new KafkaApis(controlPlaneRequestChannel, replicaManager, adminManager, groupCoordinator, transactionCoordinator,
             kafkaController, zkClient, config.brokerId, config, metadataCache, metrics, authorizer, quotaManagers,
@@ -338,11 +372,13 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
             1, s"${SocketServer.ControlPlaneMetricPrefix}RequestHandlerAvgIdlePercent", SocketServer.ControlPlaneThreadPrefix)
         }
 
+        // 监控相关
         Mx4jLoader.maybeLoad()
 
         /* Add all reconfigurables for config change notification before starting config handlers */
         config.dynamicConfig.addReconfigurables(this)
 
+        //Didi-Kafka 灾备 1
         topicConfigManager = new TopicConfigManager(replicaManager)
 
         /* start dynamic config manager */
@@ -350,15 +386,17 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
                                                            ConfigType.Client -> new ClientIdConfigHandler(quotaManagers),
                                                            ConfigType.User -> new UserConfigHandler(quotaManagers, credentialProvider),
                                                            ConfigType.Broker -> new BrokerConfigHandler(config, quotaManagers),
-                                                           ConfigType.HACluster -> new ClusterConfigHandler())
+                                                           ConfigType.HACluster -> new ClusterConfigHandler()) //Didi-Kafka 灾备 1
 
         // Create the config manager. start listening to notifications
         dynamicConfigManager = new DynamicConfigManager(zkClient, dynamicConfigHandlers)
         dynamicConfigManager.startup()
 
+        // socket server 开始对外服务
         socketServer.startControlPlaneProcessor(authorizerFutures)
         socketServer.startDataPlaneProcessors(authorizerFutures)
         brokerState.newState(RunningAsBroker)
+        // 修改初始 new KafkaServer 类的状态，启动完成
         shutdownLatch = new CountDownLatch(1)
         startupComplete.set(true)
         isStartingUp.set(false)

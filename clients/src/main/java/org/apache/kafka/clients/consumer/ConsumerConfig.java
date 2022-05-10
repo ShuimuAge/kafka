@@ -61,6 +61,7 @@ public class ConsumerConfig extends AbstractConfig {
     private static final String GROUP_INSTANCE_ID_DOC = CommonClientConfigs.GROUP_INSTANCE_ID_DOC;
 
     /** <code>max.poll.records</code> */
+    //单次拉取的最大消息量，默认500条
     public static final String MAX_POLL_RECORDS_CONFIG = "max.poll.records";
     private static final String MAX_POLL_RECORDS_DOC = "The maximum number of records returned in a single call to poll().";
 

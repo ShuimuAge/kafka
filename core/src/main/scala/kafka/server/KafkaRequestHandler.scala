@@ -67,6 +67,7 @@ class KafkaRequestHandler(id: Int,
           try {
             request.requestDequeueTimeNanos = endTime
             trace(s"Kafka request handler $id on broker $brokerId handling request $request")
+            //这边是如何处理请求的重点
             apis.handle(request)
           } catch {
             case e: FatalExitError =>
@@ -93,11 +94,11 @@ class KafkaRequestHandler(id: Int,
 
 }
 
-class KafkaRequestHandlerPool(val brokerId: Int,
-                              val requestChannel: RequestChannel,
-                              val apis: KafkaApis,
+class KafkaRequestHandlerPool(val brokerId: Int,                           //所属Broker的序号，即broker.id值
+                              val requestChannel: RequestChannel,          //SocketServer 的请求处理通道，它下辖的请求队列为所有 I/O 线程所共享
+                              val apis: KafkaApis,                         //KafkaApis实例，执行实际的请求处理逻辑
                               time: Time,
-                              numThreads: Int,
+                              numThreads: Int,                             //I/O线程池初始大小，它是 Broker 端参数 num.io.threads 的值。目前，Kafka 支持动态修改 I/O 线程池的大小
                               requestHandlerAvgIdleMetricName: String,
                               logAndThreadNamePrefix : String) extends Logging with KafkaMetricsGroup {
 
@@ -106,13 +107,18 @@ class KafkaRequestHandlerPool(val brokerId: Int,
   private val aggregateIdleMeter = newMeter(requestHandlerAvgIdleMetricName, "percent", TimeUnit.NANOSECONDS)
 
   this.logIdent = "[" + logAndThreadNamePrefix + " Kafka Request Handler on Broker " + brokerId + "], "
-  val runnables = new mutable.ArrayBuffer[KafkaRequestHandler](numThreads)
+  //I/O线程池
+  val runnables = new mutable.ArrayBuffer[KafkaRequestHandler](numThreads)     //array和arraybuffer的区别就是， 这个arraybuffer是可以添加删除元素的， 而array不可以
+  //主要是启动了numThreads个数的线程，然后线程中执行的内容是KafkaRequestHandler
   for (i <- 0 until numThreads) {
     createHandler(i)
   }
 
+  // 创建序号为指定id的I/O线程对象，并启动该线程
   def createHandler(id: Int): Unit = synchronized {
+    // 创建KafkaRequestHandler线程实例并加入I/O线程池
     runnables += new KafkaRequestHandler(id, brokerId, aggregateIdleMeter, threadPoolSize, requestChannel, apis, time)
+    // 启动KafkaRequestHandler线程
     KafkaThread.daemon(logAndThreadNamePrefix + "-kafka-request-handler-" + id, runnables(id)).start()
   }
 

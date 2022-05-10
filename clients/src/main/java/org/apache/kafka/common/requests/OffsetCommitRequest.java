@@ -33,6 +33,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+//Consumer通过发送OffsetCommitRequest请求到指定broker（偏移量管理者）提交偏移量。
+// 这个请求中包含一系列分区以及在这些分区中的消费位置（偏移量）。
 public class OffsetCommitRequest extends AbstractRequest {
     // default values for the current version
     public static final int DEFAULT_GENERATION_ID = -1;

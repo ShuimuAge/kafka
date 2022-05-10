@@ -302,6 +302,9 @@ abstract class AbstractIndex(@volatile var file: File, val baseOffset: Long, val
    * @param offset The offset to check
    * @return true if this offset is valid to be appended to this index; false otherwise
    */
+  //这个方法会将offset和baseOffset做对比，
+  // 当offset小于baseOffset或者当offset和baseOffset相减后大于Int的最大值，
+  // 那么都是异常的情况，这时就会抛出LogSegmentOffsetOverflowException异常
   def canAppendOffset(offset: Long): Boolean = {
     toRelative(offset).isDefined
   }
@@ -367,9 +370,11 @@ abstract class AbstractIndex(@volatile var file: File, val baseOffset: Long, val
    */
   private def indexSlotRangeFor(idx: ByteBuffer, target: Long, searchEntity: IndexSearchEntity): (Int, Int) = {
     // check if the index is empty
+    // 第1步：如果索引为空，直接返回<-1,-1>对
     if(_entries == 0)
       return (-1, -1)
 
+    // 封装原版的二分查找算法
     def binarySearch(begin: Int, end: Int) : (Int, Int) = {
       // binary search for the entry
       var lo = begin
@@ -388,16 +393,23 @@ abstract class AbstractIndex(@volatile var file: File, val baseOffset: Long, val
       (lo, if (lo == _entries - 1) -1 else lo + 1)
     }
 
+    // 第3步：确认热区首个索引项位于哪个槽。_warmEntries就是所谓的分割线，目前固定为8192字节处
+    // 如果是OffsetIndex，_warmEntries = 8192 / 8 = 1024，即第1024个槽
+    // 如果是TimeIndex，_warmEntries = 8192 / 12 = 682，即第682个槽
     val firstHotEntry = Math.max(0, _entries - 1 - _warmEntries)
     // check if the target offset is in the warm section of the index
+    // 第4步：判断target位移值在热区还是冷区
     if(compareIndexEntry(parseEntry(idx, firstHotEntry), target, searchEntity) < 0) {
+      // 如果在热区，搜索热区
       return binarySearch(firstHotEntry, _entries - 1)
     }
 
     // check if the target offset is smaller than the least offset
+    // 第5步：确保target位移值不能小于当前最小位移值
     if(compareIndexEntry(parseEntry(idx, 0), target, searchEntity) > 0)
       return (-1, 0)
 
+    // 第6步：如果在冷区，搜索冷区
     binarySearch(0, firstHotEntry)
   }
 

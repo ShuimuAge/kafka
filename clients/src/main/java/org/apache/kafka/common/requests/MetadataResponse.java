@@ -245,6 +245,7 @@ public class MetadataResponse extends AbstractResponse {
         return new MetadataResponse(ApiKeys.METADATA.responseSchema(version).read(buffer), version);
     }
 
+    //Topic元数据
     public static class TopicMetadata {
         private final Errors error;
         private final String topic;

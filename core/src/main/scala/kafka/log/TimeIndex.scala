@@ -64,8 +64,11 @@ class TimeIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writable:
   // We override the full check to reserve the last time index entry slot for the on roll call.
   override def isFull: Boolean = entries >= maxEntries - 1
 
+  /** 时间戳索引项的两个组成部分：**/
+  //当前日志分段最大的时间戳
   private def timestamp(buffer: ByteBuffer, n: Int): Long = buffer.getLong(n * entrySize)
 
+  //相对偏移量，表示消息相对于baseOffset 的偏移量，即消息的offset - baseOffset
   private def relativeOffset(buffer: ByteBuffer, n: Int): Int = buffer.getInt(n * entrySize + 8)
 
   def lastEntry: TimestampOffset = _lastEntry

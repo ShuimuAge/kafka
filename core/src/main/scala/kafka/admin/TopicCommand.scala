@@ -344,12 +344,17 @@ object TopicCommand extends Logging {
 
   case class ZookeeperTopicService(zkClient: KafkaZkClient) extends TopicService {
 
+    /**
+     * 向zookeeper中写入topic的元数据信息：
+     * 1. 创建 "/config/topics/<topic>" 节点，写入config信息
+     * 2. 创建 "/brokers/topics/<topic>" 节点，写入topic的分区副本分配方案
+     */
     override def createTopic(topic: CommandTopicPartition): Unit = {
       val adminZkClient = new AdminZkClient(zkClient)
       try {
-        if (topic.hasReplicaAssignment)
+        if (topic.hasReplicaAssignment) {
           adminZkClient.createTopicWithAssignment(topic.name, topic.configsToAdd, topic.replicaAssignment.get)
-        else
+        } else
           adminZkClient.createTopic(topic.name, topic.partitions.get, topic.replicationFactor.get, topic.configsToAdd, topic.rackAwareMode)
         println(s"Created topic ${topic.name}.")
       } catch  {

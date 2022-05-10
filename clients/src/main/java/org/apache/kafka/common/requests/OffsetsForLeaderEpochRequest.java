@@ -107,6 +107,7 @@ public class OffsetsForLeaderEpochRequest extends AbstractRequest {
         private final Map<TopicPartition, PartitionData> epochsByPartition;
         private final int replicaId;
 
+        //Didi-Kafka 1 改成 public
         public Builder(short oldestAllowedVersion, short latestAllowedVersion, Map<TopicPartition, PartitionData> epochsByPartition, int replicaId) {
             super(ApiKeys.OFFSET_FOR_LEADER_EPOCH, oldestAllowedVersion, latestAllowedVersion);
             this.epochsByPartition = epochsByPartition;
@@ -216,8 +217,11 @@ public class OffsetsForLeaderEpochRequest extends AbstractRequest {
         return new OffsetsForLeaderEpochResponse(throttleTimeMs, errorResponse);
     }
 
+    //里面包含了Follower副本在本地保存的leader epoch 和从Leader副本获取到的leader epoch
     public static class PartitionData {
+        //Follower副本在本地保存的leader epoch
         public final Optional<Integer> currentLeaderEpoch;
+        //从Leader副本获取到的leader epoch
         public final int leaderEpoch;
 
         public PartitionData(Optional<Integer> currentLeaderEpoch, int leaderEpoch) {

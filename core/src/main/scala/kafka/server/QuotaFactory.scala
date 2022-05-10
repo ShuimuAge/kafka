@@ -29,10 +29,13 @@ object QuotaType  {
   case object Request extends QuotaType
   case object LeaderReplication extends QuotaType
   case object FollowerReplication extends QuotaType
+  /*** Didi-Kafka 灾备 1 ↓ ***/
   case object LeaderMirror extends QuotaType
   case object FollowerMirror extends QuotaType
+  /*** Didi-Kafka 灾备 1 ↑ ***/
   case object AlterLogDirsReplication extends QuotaType
 }
+//限流配额类型
 sealed trait QuotaType
 
 object QuotaFactory extends Logging {
@@ -48,8 +51,10 @@ object QuotaFactory extends Logging {
                            request: ClientRequestQuotaManager,
                            leader: ReplicationQuotaManager,
                            follower: ReplicationQuotaManager,
+                           /*** Didi-Kafka 灾备 1 ↓ ***/
                            mirrorLeader: ReplicationQuotaManager,
                            mirrorFollower: ReplicationQuotaManager,
+                           /*** Didi-Kafka 灾备 1 ↑ ***/
                            alterLogDirs: ReplicationQuotaManager,
                            clientQuotaCallback: Option[ClientQuotaCallback]) {
     def shutdown(): Unit = {
@@ -70,8 +75,10 @@ object QuotaFactory extends Logging {
       new ClientRequestQuotaManager(clientRequestConfig(cfg), metrics, time, threadNamePrefix, clientQuotaCallback),
       new ReplicationQuotaManager(replicationConfig(cfg), metrics, LeaderReplication, time),
       new ReplicationQuotaManager(replicationConfig(cfg), metrics, FollowerReplication, time),
+      /*** Didi-Kafka 灾备 1 ↓ ***/
       new ReplicationQuotaManager(replicationConfig(cfg), metrics, LeaderMirror, time),
       new ReplicationQuotaManager(replicationConfig(cfg), metrics, FollowerMirror, time),
+      /*** Didi-Kafka 灾备 1 ↑ ***/
       new ReplicationQuotaManager(alterLogDirsReplicationConfig(cfg), metrics, AlterLogDirsReplication, time),
       clientQuotaCallback
     )

@@ -27,6 +27,8 @@ import org.apache.kafka.common.protocol.types.Struct;
 import java.nio.ByteBuffer;
 import java.util.Collections;
 
+//关闭心跳，发送JGR请求，
+//GroupCoordinator接收请求并指定消费者组的一个消费者成为Leader，让其负责分区partition的分配，并返回分区分配策略
 public class JoinGroupRequest extends AbstractRequest {
 
     public static class Builder extends AbstractRequest.Builder<JoinGroupRequest> {

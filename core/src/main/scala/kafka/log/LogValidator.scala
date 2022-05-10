@@ -38,6 +38,7 @@ import scala.collection.mutable.ArrayBuffer
 /**
  * The source of an append to the log. This is used when determining required validations.
  */
+// 写入方来源：副本、coordinator、客户端等
 private[kafka] sealed trait AppendOrigin
 private[kafka] object AppendOrigin {
 
@@ -59,6 +60,8 @@ private[kafka] object AppendOrigin {
    */
   case object Client extends AppendOrigin
 
+  // Didi-Kafka 灾备 1
+  //添加写入方来源项：Mirror
   case object Mirror extends AppendOrigin
 }
 

@@ -11,6 +11,7 @@ import scala.collection.*;
 
 import java.util.*;
 
+/*** Didi-Kafka 灾备 1 ↓ ***/
 public class TopicConfigManager {
 
     public static final String DIDI_HA_REMOTE_CLUSTER = TopicConfig.DIDI_HA_REMOTE_CLUSTER;
@@ -49,10 +50,8 @@ public class TopicConfigManager {
         }
 
         String remoteTopicName = (String) configs.getOrDefault(DIDI_HA_REMOTE_TOPIC, topicName);
-        if (Topic.isInternal(remoteTopicName) && !Objects.equals( remoteTopicName,
-                Topic.GROUP_METADATA_TOPIC_NAME))
-        throw new IllegalArgumentException(String.format("({} cannot be remote-Topic" ,
-                remoteTopicName));
+        if (Topic.isInternal(remoteTopicName) && !Objects.equals(remoteTopicName, Topic.GROUP_METADATA_TOPIC_NAME))
+            throw new IllegalArgumentException(String.format("({} cannot be remote-Topic", remoteTopicName));
         //the remoteTopic cannot be any of InternalTopics
         Map<String, Object> realConfigs = JavaConverters.mapAsJavaMap(LogConfig.getRealConfigs(configs));
         if (configs.containsKey(DIDI_HA_REMOTE_CLUSTER)) {

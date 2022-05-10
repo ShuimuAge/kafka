@@ -38,7 +38,9 @@ object ConfigType {
   val Client = "clients"
   val User = "users"
   val Broker = "brokers"
+  //Didi-Kafka 灾备 1
   val HACluster = "ha-clusters"
+  //Didi-Kafka 灾备 1 添加HACluster
   val all = Seq(Topic, Client, User, Broker, HACluster)
 }
 

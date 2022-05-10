@@ -32,19 +32,38 @@ import java.util.Set;
 /**
  * An immutable representation of a subset of the nodes, topics, and partitions in the Kafka cluster.
  */
+
+/**
+ * Cluster 实例
+ * 主要是保存：
+ *
+ * 1. broker.id 与 node 的对应关系；
+ * 2. topic 与 partition （PartitionInfo）的对应关系；
+ * 3. node 与 partition （PartitionInfo）的对应关系。
+ */
 public final class Cluster {
 
+    // 标识当前元数据信息是初始化的配置还是启动之后的
     private final boolean isBootstrapConfigured;
+    // kafka集群中全部Node的集合
     private final List<Node> nodes;
+    // topic信息，这里根据topic属性进行分类
     private final Set<String> unauthorizedTopics;
     private final Set<String> invalidTopics;
     private final Set<String> internalTopics;
+
+    // kafka集群中controller所在的节点
     private final Node controller;
+    // 可以根据TopicPartition来查询该partition的具体信息
     private final Map<TopicPartition, PartitionInfo> partitionsByTopicPartition;
+    // 保存各个topic对应的分区列表
     private final Map<String, List<PartitionInfo>> partitionsByTopic;
     private final Map<String, List<PartitionInfo>> availablePartitionsByTopic;
+    // 根据nodeId来查询落到其上的partition具体信息数组
     private final Map<Integer, List<PartitionInfo>> partitionsByNode;
+    // 根据nodeId来查询Node对象
     private final Map<Integer, Node> nodesById;
+    // 集群的唯一标识
     private final ClusterResource clusterResource;
 
     /**
@@ -272,6 +291,7 @@ public final class Cluster {
      * @param topic The topic to get the number of partitions for
      * @return The number of partitions or null if there is no corresponding metadata
      */
+    // 如果 topic 已经存在 meta 中,则返回该 topic 的 partition 数,否则返回 null
     public Integer partitionCountForTopic(String topic) {
         List<PartitionInfo> partitions = this.partitionsByTopic.get(topic);
         return partitions == null ? null : partitions.size();

@@ -79,6 +79,7 @@ object ConfigCommand extends Config {
     try {
       val opts = new ConfigCommandOptions(args)
 
+      // Didi-Kafka 灾备 1 - 添加cluster
       CommandLineUtils.printHelpAndExitIfNeeded(opts, "This tool helps to manipulate and describe entity config for a topic, client, user, cluster or broker")
 
       opts.checkArgs()
@@ -158,7 +159,8 @@ object ConfigCommand extends Config {
     if (invalidConfigs.nonEmpty)
       throw new InvalidConfigurationException(s"Invalid config(s): ${invalidConfigs.mkString(",")}")
 
-    //TODO 这个地方有点逻辑问题，改了一处
+    // Didi-Kafka 灾备 1
+    //TODO 这个地方有点逻辑问题，改了一处：应该改成存在Topic或User对某集群的依赖时不能 清空 该集群配置
     //存在Topic或User对某集群的依赖时不能删除该集群配置
     if (entityType == ConfigType.HACluster && configsToBeDeleted.nonEmpty)
       adminZkClient.validClusterConfigsDeletable(entityName)
@@ -581,6 +583,7 @@ object ConfigCommand extends Config {
             "For entity-type '" + ConfigType.Broker + "': " + DynamicConfig.Broker.names.asScala.toSeq.sorted.map("\t" + _).mkString(nl, nl, nl) +
             "For entity-type '" + ConfigType.User + "': " + DynamicConfig.User.names.asScala.toSeq.sorted.map("\t" + _).mkString(nl, nl, nl) +
             "For entity-type '" + ConfigType.Client + "': " + DynamicConfig.Client.names.asScala.toSeq.sorted.map("\t" + _).mkString(nl, nl, nl) +
+            // Didi-Kafka 灾备 1
             "For entity-type '" + ConfigType.HACluster + "': " + HAClusterConfig.configDef.names.asScala.toSeq.sorted.map("\t" + _).mkString(nl, nl, nl) +
             s"Entity types '${ConfigType.User}' and '${ConfigType.Client}' may be specified together to update config for clients of a specific user.")
             .withRequiredArg

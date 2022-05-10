@@ -579,7 +579,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
 
     private final Time time;
     private final ConsumerNetworkClient client;
-    private final SubscriptionState subscriptions;
+    private final SubscriptionState subscriptions;            // 保存leader分配好的分区，KafkaConsumer直接往该分区拉取数据
     private final ConsumerMetadata metadata;
     private final long retryBackoffMs;
     private final long requestTimeoutMs;
@@ -729,6 +729,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
             this.subscriptions = new SubscriptionState(logContext, offsetResetStrategy);
             ClusterResourceListeners clusterResourceListeners = configureClusterResourceListeners(keyDeserializer,
                     valueDeserializer, metrics.reporters(), interceptorList);
+            // 将subscriptions字段赋值给metadata，拉取消息的时候会往metadata中的subscriptions字段读取要消费的分区列表。
             this.metadata = new ConsumerMetadata(retryBackoffMs,
                     config.getLong(ConsumerConfig.METADATA_MAX_AGE_CONFIG),
                     !config.getBoolean(ConsumerConfig.EXCLUDE_INTERNAL_TOPICS_CONFIG),
@@ -788,6 +789,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                         enableAutoCommit,
                         config.getInt(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG),
                         this.interceptors);
+            // 将subscriptions字段赋值给fetcher中的subscriptions，拉取消息的时候会往fetcher中的subscriptions字段读取要消费的分区列表。
             this.fetcher = new Fetcher<>(
                     logContext,
                     this.client,
@@ -1001,6 +1003,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      *                               previously (without a subsequent call to {@link #unsubscribe()}), or if not
      *                               configured at-least one partition assignment strategy
      */
+    //通过集合的方式订阅topic
     @Override
     public void subscribe(Collection<String> topics) {
         subscribe(topics, new NoOpConsumerRebalanceListener());
@@ -1059,6 +1062,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      *                               previously (without a subsequent call to {@link #unsubscribe()}), or if not
      *                               configured at-least one partition assignment strategy
      */
+    //通过正则表达式订阅
     @Override
     public void subscribe(Pattern pattern) {
         subscribe(pattern, new NoOpConsumerRebalanceListener());
@@ -1070,6 +1074,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      *
      * @throws org.apache.kafka.common.KafkaException for any other unrecoverable errors (e.g. rebalance callback errors)
      */
+    //取消订阅，相当于将subscribe()或assign()中的参数设置为空
     public void unsubscribe() {
         acquireAndEnsureOpen();
         try {
@@ -1105,6 +1110,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      *                               (without a subsequent call to {@link #unsubscribe()})
      */
     @Override
+    //直接订阅某些topic的特定分区
     public void assign(Collection<TopicPartition> partitions) {
         acquireAndEnsureOpen();
         try {
@@ -1212,6 +1218,8 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * @throws org.apache.kafka.common.errors.FencedInstanceIdException if this consumer instance gets fenced by broker.
      */
     @Override
+    //Kafka消费动作，拉取模式
+    //timeout:超时时间，该阻塞时间内消费者缓冲区内没有可用数据时会阻塞等待，超时则返回
     public ConsumerRecords<K, V> poll(final Duration timeout) {
         return poll(time.timer(timeout), true);
     }
@@ -1219,20 +1227,30 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     /**
      * @throws KafkaException if the rebalance callback throws exception
      */
+    //KafkaConsumer.poll()
     private ConsumerRecords<K, V> poll(final Timer timer, final boolean includeMetadataInTimeout) {
+        //由于 consumer 内部是非线程安全的，所以必须要确保只有一个线程访问 consumer，
+        // 因此需要在这获取锁。一旦多个线程同时访问这个方法，那么就会报错
         acquireAndEnsureOpen();
         try {
             this.kafkaConsumerMetrics.recordPollStart(timer.currentTimeMs());
 
+            // 判断订阅模式，有四种：NONE,AUTO_TOPICS, AUTO_PATTERN,USER_ASSIGNED;如果为NONE则报异常
+            //Consumer 如果没有指定任何 topics，那么拉取数据也就没意义了,报异常
             if (this.subscriptions.hasNoSubscriptionOrUserAssignment()) {
                 throw new IllegalStateException("Consumer is not subscribed to any topics or assigned any partitions");
             }
 
+            //TODO-ssy 循环拉取记录，直到拉取超时或者接收到了一些记录
             do {
+                //可以在拉取的过程中中断 consumer，比如你设置了拉取的超时时间以后，超过了超时时间就会抛出异常
                 client.maybeTriggerWakeup();
 
+                //获取元数据添加超时机制，注意这个参数建议设置为 true，如果设置为 false，就会一直去同步获取元数据，
+                // 极端情况可能就一直卡住了，而设置为 true 的话，就会先去尝试更新元数据信息，如果更新失败会立刻返回空记录，结束 poll 过程
                 if (includeMetadataInTimeout) {
                     // try to update assignment metadata BUT do not need to block on the timer for join group
+                    // 触发一次rebalance过程，实际上是获取leader分配后的分区，并赋值给subscriptions字段
                     updateAssignmentMetadataIfNeeded(timer, false);
                 } else {
                     while (!updateAssignmentMetadataIfNeeded(time.timer(Long.MAX_VALUE), true)) {
@@ -1240,7 +1258,10 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                     }
                 }
 
+                // 实际上拉取消息的入口,Consumer从Kakfa中拉取记录
                 final Map<TopicPartition, List<ConsumerRecord<K, V>>> records = pollForFetches(timer);
+                //这里做了一个优化，如果在上面拉取时成功返回了一些记录，那么 consumer 就会提前发送下一次的拉取请求，
+                // 这样当应用在处理刚刚拉取的新记录的时候，consumer 也同时在后台为你拉取好了下一次要用的数据，避免了 IO 阻塞
                 if (!records.isEmpty()) {
                     // before returning the fetched records, we can send off the next round of fetches
                     // and avoid block waiting for their responses to enable pipelining while the user
@@ -1251,7 +1272,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                     if (fetcher.sendFetches() > 0 || client.hasPendingRequests()) {
                         client.transmitSends();
                     }
-
+                    //Consumer 通过 interceptor chain 传递已经拉取的记录，可以通过 interceptor 很方便的对输入的记录做一些更改，一般用于日志和监控。
                     return this.interceptors.onConsume(new ConsumerRecords<>(records));
                 }
             } while (timer.notExpired());
@@ -1270,7 +1291,10 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
         return updateAssignmentMetadataIfNeeded(timer, true);
     }
 
+    //最终调用了AbstractCoordinator.sendJoinGroupRequest 方法，向消费者组对应的 GroupCoordinator 所在节点发送了JoinGroupRequest 请求。
     boolean updateAssignmentMetadataIfNeeded(final Timer timer, final boolean waitForJoinGroup) {
+        // consumerCoordinator
+        //TODO-ssy 确保当前消费组 的 groupCoordinator 是已知的，并且当前consumer已经加入group
         if (coordinator != null && !coordinator.poll(timer, waitForJoinGroup)) {
             return false;
         }
@@ -1281,6 +1305,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     /**
      * @throws KafkaException if the rebalance callback throws exception
      */
+    //消费端拉取消息流程的实现入口
     private Map<TopicPartition, List<ConsumerRecord<K, V>>> pollForFetches(Timer timer) {
         long pollTimeout = coordinator == null ? timer.remainingMs() :
                 Math.min(coordinator.timeToNextPoll(timer.currentTimeMs()), timer.remainingMs());
@@ -1292,6 +1317,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
         }
 
         // send any new fetches (won't resend pending fetches)
+        // 拉取消息
         fetcher.sendFetches();
 
         // We do not want to be stuck blocking in poll if we are missing some positions
@@ -1928,6 +1954,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      *         the amount of time allocated by {@code default.api.timeout.ms} expires.
      */
     @Override
+    //查询指定主体的元数据信息
     public List<PartitionInfo> partitionsFor(String topic) {
         return partitionsFor(topic, Duration.ofMillis(defaultApiTimeoutMs));
     }

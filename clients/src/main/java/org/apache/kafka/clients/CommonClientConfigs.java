@@ -111,6 +111,7 @@ public class CommonClientConfigs {
                                                        + "This can be used in combination with a larger session timeout to avoid group rebalances caused by transient unavailability "
                                                        + "(e.g. process restarts). If not set, the consumer will join the group as a dynamic member, which is the traditional behavior.";
 
+    //控制poll的间隔，即在两次poll()中间的数据处理时间  默认300000ms即5分钟
     public static final String MAX_POLL_INTERVAL_MS_CONFIG = "max.poll.interval.ms";
     public static final String MAX_POLL_INTERVAL_MS_DOC = "The maximum delay between invocations of poll() when using "
                                                           + "consumer group management. This places an upper bound on the amount of time that the consumer can be idle "
@@ -126,6 +127,8 @@ public class CommonClientConfigs {
                                                           + "flush any pending data and commit offsets. If the timeout is exceeded, then the worker will be removed "
                                                           + "from the group, which will cause offset commit failures.";
 
+    //Consumer Session心跳超时时间；默认为10000(10s)；
+    // 这个值的大小必须介于broker configuration中的group.min.session.timeout.ms 与 group.max.session.timeout.ms之间。
     public static final String SESSION_TIMEOUT_MS_CONFIG = "session.timeout.ms";
     public static final String SESSION_TIMEOUT_MS_DOC = "The timeout used to detect client failures when using "
                                                         + "Kafka's group management facility. The client sends periodic heartbeats to indicate its liveness "
@@ -134,6 +137,7 @@ public class CommonClientConfigs {
                                                         + "must be in the allowable range as configured in the broker configuration by <code>group.min.session.timeout.ms</code> "
                                                         + "and <code>group.max.session.timeout.ms</code>.";
 
+    //心跳发送间隔；默认为3000(3s)；通常设置值低于session.timeout.ms的1/3
     public static final String HEARTBEAT_INTERVAL_MS_CONFIG = "heartbeat.interval.ms";
     public static final String HEARTBEAT_INTERVAL_MS_DOC = "The expected time between heartbeats to the consumer "
                                                            + "coordinator when using Kafka's group management facilities. Heartbeats are used to ensure that the "

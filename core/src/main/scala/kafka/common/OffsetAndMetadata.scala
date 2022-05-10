@@ -19,6 +19,7 @@ package kafka.common
 
 import java.util.Optional
 
+//待保存的offset值
 case class OffsetAndMetadata(offset: Long,
                              leaderEpoch: Optional[Integer],
                              metadata: String,

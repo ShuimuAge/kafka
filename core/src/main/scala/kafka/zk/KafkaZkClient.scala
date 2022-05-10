@@ -78,6 +78,7 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
    * @param data the znode data
    * @return the created path (including the appended monotonically increasing number)
    */
+  //在ZooKeeper的path路径下创建一个持久顺序节点
   private[kafka] def createSequentialPersistentPath(path: String, data: Array[Byte]): String = {
     val createRequest = CreateRequest(path, data, defaultAcls(path), CreateMode.PERSISTENT_SEQUENTIAL)
     val createResponse = retryRequestUntilConnected(createRequest)
@@ -103,26 +104,36 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
    * @return the (updated controller epoch, epoch zkVersion) tuple
    * @throws ControllerMovedException if fail to create /controller or fail to increment controller epoch.
    */
+  //broker 发起竞选，选举自己为新的 controller
+  //尝试在 zk 上创建/controller 节点并注册当前节点的信息，包括broker id 和 时间戳。并更新”/controller_epoch”节点ControllerEpoch的值
+  //（注意：controller 节点是临时节点，如果当前 controller 与 zk 的 session 断开，那么 controller 的临时节点会消失，会触发 controller 的重新选举）
   def registerControllerAndIncrementControllerEpoch(controllerId: Int): (Int, Int) = {
     val timestamp = time.milliseconds()
 
     // Read /controller_epoch to get the current controller epoch and zkVersion,
     // create /controller_epoch with initial value if not exists
+    // 从 "/controller_epoch" 获取当前 controller 对应的 epoch 与 zkVersion
+    // 若该节点不存在则尝试创建
     val (curEpoch, curEpochZkVersion) = getControllerEpoch
       .map(e => (e._1, e._2.getVersion))
       .getOrElse(maybeCreateControllerEpochZNode())
 
     // Create /controller and update /controller_epoch atomically
+    //将获得的上一代curEpoch自增，作为自己的controllerEpoch参与竞选
     val newControllerEpoch = curEpoch + 1
     val expectedControllerEpochZkVersion = curEpochZkVersion
 
     debug(s"Try to create ${ControllerZNode.path} and increment controller epoch to $newControllerEpoch with expected controller epoch zkVersion $expectedControllerEpochZkVersion")
 
+    // 处理 /controller 节点已存在的情况，直接返回最新节点信息
     def checkControllerAndEpoch(): (Int, Int) = {
+      //获取zk节点/controller节点的id值
       val curControllerId = getControllerId.getOrElse(throw new ControllerMovedException(
         s"The ephemeral node at ${ControllerZNode.path} went away while checking whether the controller election succeeds. " +
           s"Aborting controller startup procedure"))
+      //如果zk节点的controller id值和当前的id值一致
       if (controllerId == curControllerId) {
+        //获取zk/controller_epoch节点的值
         val (epoch, stat) = getControllerEpoch.getOrElse(
           throw new IllegalStateException(s"${ControllerEpochZNode.path} existed before but goes away while trying to read it"))
 
@@ -130,20 +141,34 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
         // is associated with the current broker during controller election because we already knew that the zk
         // transaction succeeds based on the controller znode verification. Other rounds of controller
         // election will result in larger epoch number written in zk.
+        // 如果最新的 epoch 与 newControllerEpoch 相等，则可以推断 zkVersion 与当前 broker 已知的 zkVersion 一致
+        //则返回正常的(epoch,dataVersion)
         if (epoch == newControllerEpoch)
           return (newControllerEpoch, stat.getVersion)
       }
+      //否则就是controller的位置被交给另一个broker了，抛出异常
       throw new ControllerMovedException("Controller moved to another broker. Aborting controller startup procedure")
     }
 
+    // 封装 zookeeper 请求
     def tryCreateControllerZNodeAndIncrementEpoch(): (Int, Int) = {
+      //封装创建/controller临时节点和更新/controller_epoch节点数据为新epoch值的请求，发送并获取响应
+      //节点/controller的数据格式为{"version":1,"brokerid":0,"timestamp":"xxxxx"}
       val response = retryRequestUntilConnected(
         MultiRequest(Seq(
+          // 发送 CreateRequest
+          // 用自己的broker id创建 "/controller" 临时节点
           CreateOp(ControllerZNode.path, ControllerZNode.encode(controllerId, timestamp), defaultAcls(ControllerZNode.path), CreateMode.EPHEMERAL),
+          // 发送 SetDataRequest
+          // 更新 /controller_epoch 节点信息为新controller-epoch
           SetDataOp(ControllerEpochZNode.path, ControllerEpochZNode.encode(newControllerEpoch), expectedControllerEpochZkVersion)))
       )
+      //根据响应中的结果码，执行对应的操作
       response.resultCode match {
+        //如果节点已经存在，或者/controller_epoch节点的dataVersion冲突，
+        //则检查/controller节点和/controller_epoch节点的值是否和准备写入或者更新的值一致
         case Code.NODEEXISTS | Code.BADVERSION => checkControllerAndEpoch()
+        //如果创建成功，则返回新的epoch和对应zk节点的dataVersion
         case Code.OK =>
           val setDataResult = response.zkOpResults(1).rawOpResult.asInstanceOf[SetDataResult]
           (newControllerEpoch, setDataResult.getStat.getVersion)
@@ -151,9 +176,12 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
       }
     }
 
+    //参与竞选具体过程
+    // 向 zookeepr 发起请求,创建 "/controller" 并更新 /controller_epoch 自增
     tryCreateControllerZNodeAndIncrementEpoch()
   }
 
+  //尝试创建"/controller_epoch" 节点
   private def maybeCreateControllerEpochZNode(): (Int, Int) = {
     createControllerEpochRaw(KafkaController.InitialControllerEpoch).resultCode match {
       case Code.OK =>
@@ -351,6 +379,7 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
    * @param sanitizedEntityName entity name
    * @throws KeeperException if there is an error while setting or creating the znode
    */
+  /** TODO-ssy 创建或更新 "/config/<rootEntityType>/<sanitizedEntityName>" 节点，写入config信息 */
   def setOrCreateEntityConfigs(rootEntityType: String, sanitizedEntityName: String, config: Properties) = {
 
     def set(configData: Array[Byte]): SetDataResponse = {
@@ -360,6 +389,7 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
     }
 
     def createOrSet(configData: Array[Byte]): Unit = {
+      // "/config/<rootEntityType>/<sanitizedEntityName>"
       val path = ConfigEntityZNode.path(rootEntityType, sanitizedEntityName)
       try createRecursive(path, ConfigEntityZNode.encode(config))
       catch {
@@ -460,6 +490,7 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
    * Gets all topics in the cluster.
    * @return sequence of topics in the cluster.
    */
+  //获取集群中的所有Topics
   def getAllTopicsInCluster: Set[String] = {
     val getChildrenResponse = retryRequestUntilConnected(GetChildrenRequest(TopicsZNode.path))
     getChildrenResponse.resultCode match {
@@ -472,11 +503,12 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
 
 
   /**
+   * Didi-Kafka 灾备 1
    * Gets all users in the cluster.
    * @return sequence of topics in the cluster.
    */
   def getAllConfiguredUsers: Set [String] = {
-    val getChildrenResponse = retryRequestUntilConnected(GetChildrenRequest(ConfigEntityTypeZNode path (s"users")))
+    val getChildrenResponse = retryRequestUntilConnected(GetChildrenRequest(ConfigEntityTypeZNode.path (s"users")))
     getChildrenResponse.resultCode match {
       case Code.OK => getChildrenResponse.children.toSet
       case Code.NONODE => Set.empty
@@ -527,6 +559,7 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
    * @param assignment the partition to replica mapping to set for the given topic
    * @throws KeeperException if there is an error while creating assignment
    */
+  /** 创建"/brokers/topics/<topic>"节点并写入topic的分区副本分配方案 */
   def createTopicAssignment(topic: String, assignment: Map[TopicPartition, Seq[Int]]) = {
     val persistedAssignments = assignment.mapValues(ReplicaAssignment(_)).toMap
     createRecursive(TopicZNode.path(topic), TopicZNode.encode(persistedAssignments))
@@ -568,6 +601,7 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
    * Deletes all log dir event notifications.
    * @param expectedControllerEpochZkVersion expected controller epoch zkVersion.
    */
+  //删除log_dir_event_notification这个目录下面的子节点
   def deleteLogDirEventNotifications(expectedControllerEpochZkVersion: Int): Unit = {
     val getChildrenResponse = retryRequestUntilConnected(GetChildrenRequest(LogDirEventNotificationZNode.path))
     if (getChildrenResponse.resultCode == Code.OK) {
@@ -604,6 +638,7 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
     * @param topics the topics whose partitions we wish to get the assignments for.
     * @return the full replica assignment for each partition from the given topics.
     */
+  //向zk的"/brokers/topics/<topic>"节点获取该topic下分区及其副本分配列表
   def getFullReplicaAssignmentForTopics(topics: Set[String]): Map[TopicPartition, ReplicaAssignment] = {
     val getDataRequests = topics.map(topic => GetDataRequest(TopicZNode.path(topic), ctx = Some(topic)))
     val getDataResponses = retryRequestsUntilConnected(getDataRequests.toSeq)
@@ -744,6 +779,7 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
    * since the previous update may have succeeded (but the stored zkVersion no longer matches the expected one).
    * In this case, we will run the optionalChecker to further check if the previous write did indeed succeeded.
    */
+  //将状态信息写入到 zk 中的持久性节点
   def conditionalUpdatePath(path: String, data: Array[Byte], expectVersion: Int,
                             optionalChecker: Option[(KafkaZkClient, String, Array[Byte]) => (Boolean,Int)] = None): (Boolean, Int) = {
 
@@ -910,6 +946,10 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
    * @param partitions the partitions for which we want to get states.
    * @return map containing LeaderIsrAndControllerEpoch of each partition for we were able to lookup the partition state.
    */
+  //leaderAndIsrInfo.append("(Leader:" + leaderAndIsr.leader)
+  // leaderAndIsrInfo.append(",ISR:" + leaderAndIsr.isr.mkString(","))
+  // leaderAndIsrInfo.append(",LeaderEpoch:" + leaderAndIsr.leaderEpoch)
+  // leaderAndIsrInfo.append(",ControllerEpoch:" + controllerEpoch + ")")
   def getTopicPartitionStates(partitions: Seq[TopicPartition]): Map[TopicPartition, LeaderIsrAndControllerEpoch] = {
     val getDataResponses = getTopicPartitionStatesRaw(partitions)
     getDataResponses.flatMap { getDataResponse =>
@@ -968,9 +1008,12 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
    * Gets the isr change notifications as strings. These strings are the znode names and not the absolute znode path.
    * @return sequence of znode names and not the absolute znode path.
    */
+  // 去zk顺序节点/isr_change_notification 获取所有子节点(isr_change_序号)的序号
   def getAllIsrChangeNotifications: Seq[String] = {
+    //获取/isr_change_notification节点下的子节点
     val getChildrenResponse = retryRequestUntilConnected(GetChildrenRequest(IsrChangeNotificationZNode.path))
     getChildrenResponse.resultCode match {
+      //获取子节点"isr_change_序号"中的序号
       case Code.OK => getChildrenResponse.children.map(IsrChangeNotificationSequenceZNode.sequenceNumber)
       case Code.NONODE => Seq.empty
       case _ => throw getChildrenResponse.resultException.get
@@ -1057,7 +1100,9 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
    * Gets the controller id.
    * @return optional integer that is Some if the controller znode exists and can be parsed and None otherwise.
    */
+  //获取zk节点/controller节点的id值
   def getControllerId: Option[Int] = {
+    //向"/controller"节点请求数据
     val getDataRequest = GetDataRequest(ControllerZNode.path)
     val getDataResponse = retryRequestUntilConnected(getDataRequest)
     getDataResponse.resultCode match {
@@ -1080,6 +1125,7 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
    * Gets the controller epoch.
    * @return optional (Int, Stat) that is Some if the controller epoch path exists and None otherwise.
    */
+  //获取zk中"/controller_epoch"节点中数据
   def getControllerEpoch: Option[(Int, Stat)] = {
     val getDataRequest = GetDataRequest(ControllerEpochZNode.path)
     val getDataResponse = retryRequestUntilConnected(getDataRequest)
@@ -1205,7 +1251,11 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
     debug(s"Added $logDirEventNotificationPath for broker $brokerId")
   }
 
+  //在ZooKeeper的/isr_change_notification路径下创建一个以isr_change_开头的持久顺序节点并写入isChangeSet中的信息
   def propagateIsrChanges(isrChangeSet: collection.Set[TopicPartition]): Unit = {
+    //1. 在ZooKeeper的/isr_change_notification路径下创建一个以isr_change_开头的持久顺序节点
+    // (比如"/isr_change_notification/isr_change_0000000000")
+    //2. 将isChangeSet中的信息保存到这个节点中
     val isrChangeNotificationPath: String = createSequentialPersistentPath(IsrChangeNotificationSequenceZNode.path(),
       IsrChangeNotificationSequenceZNode.encode(isrChangeSet))
     debug(s"Added $isrChangeNotificationPath for $isrChangeSet")

@@ -26,7 +26,7 @@ import org.apache.kafka.common.protocol.types.Struct;
 
 import java.nio.ByteBuffer;
 
-
+//客户端在rebalance第一阶段请求
 public class FindCoordinatorRequest extends AbstractRequest {
 
     public static class Builder extends AbstractRequest.Builder<FindCoordinatorRequest> {
@@ -91,6 +91,7 @@ public class FindCoordinatorRequest extends AbstractRequest {
         return data;
     }
 
+    //coordinator类型，默认为GROUP,表示普通消费组
     public enum CoordinatorType {
         GROUP((byte) 0), TRANSACTION((byte) 1);
 

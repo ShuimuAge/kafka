@@ -5,16 +5,19 @@ import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.errors.InvalidConfigurationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+
+/*** Didi-Kafka 灾备 1 ↓ ***/
 public class ClusterConfigManager {
     private static final Logger log = LoggerFactory.getLogger(ClusterConfigManager.class);
-    
+
     private static Map<String, Properties> didiHAClusterConfigs = new HashMap<>();
-    
+
     private static ConfigDef DIDI_HA_CLUSTER_CONFIGS = HAClusterConfig.configDef();
-    
+
     public static void validateConfigs(Properties configs) {
         for (String key : configs.stringPropertyNames()) {
             if (!HAClusterConfig.configNames().contains(key))
@@ -40,12 +43,15 @@ public class ClusterConfigManager {
         didiHAClusterConfigs.put(cluster, configs);
         log.info("set or update configs for cluster: {}, configs of this cluster: {}", cluster, getConfigs(cluster));
     }
-        public static Object getConfig(String clusterId, String key) {
-            if (!didiHAClusterConfigs.containsKey(clusterId))return null;
-            return didiHAClusterConfigs.get(clusterId).get(key);
-        }
-        public static Properties getConfigs(String clusterId) {
-            if (!didiHAClusterConfigs.containsKey(clusterId)) return new Properties();
-            return didiHAClusterConfigs.get(clusterId) ;
+
+    public static Object getConfig(String clusterId, String key) {
+        if (!didiHAClusterConfigs.containsKey(clusterId)) return null;
+        return didiHAClusterConfigs.get(clusterId).get(key);
+    }
+
+    //获取集群所有配置
+    public static Properties getConfigs(String clusterId) {
+        if (!didiHAClusterConfigs.containsKey(clusterId)) return new Properties();
+        return didiHAClusterConfigs.get(clusterId);
     }
 }

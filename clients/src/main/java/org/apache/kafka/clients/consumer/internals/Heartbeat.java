@@ -106,6 +106,7 @@ public final class Heartbeat {
         heartbeatTimer.reset(rebalanceConfig.heartbeatIntervalMs);
     }
 
+    // 更新心跳时间
     void resetSessionTimeout() {
         update(time.milliseconds());
         sessionTimer.reset(rebalanceConfig.sessionTimeoutMs);

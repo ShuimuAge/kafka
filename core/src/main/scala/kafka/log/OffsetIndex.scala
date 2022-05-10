@@ -87,8 +87,12 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
    */
   def lookup(targetOffset: Long): OffsetPosition = {
     maybeLock(lock) {
+      // 使用私有变量复制出整个索引映射区
       val idx = mmap.duplicate
+      // largestLowerBoundSlotFor方法底层使用了改进版的二分查找算法寻找对应的槽
       val slot = largestLowerBoundSlotFor(idx, targetOffset, IndexSearchType.KEY)
+      // 如果没找到，返回一个空的位置，即物理文件位置从0开始，表示从头读日志文件
+      // 否则返回slot槽对应的索引项
       if(slot == -1)
         OffsetPosition(baseOffset, 0)
       else
@@ -112,8 +116,11 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
     }
   }
 
+  /** 偏移量索引项的两个组成部分：**/
+  //相对偏移量，表示消息相对于baseOffset 的偏移量，即消息的offset - baseOffset
   private def relativeOffset(buffer: ByteBuffer, n: Int): Int = buffer.getInt(n * entrySize)
 
+  //position,表示消息在日志分段文件中对应的物理地址
   private def physical(buffer: ByteBuffer, n: Int): Int = buffer.getInt(n * entrySize + 4)
 
   override protected def parseEntry(buffer: ByteBuffer, n: Int): OffsetPosition = {
@@ -160,6 +167,7 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
   override def truncateTo(offset: Long): Unit = {
     inLock(lock) {
       val idx = mmap.duplicate
+      //根据指定位移返回消息中位移
       val slot = largestLowerBoundSlotFor(idx, offset, IndexSearchType.KEY)
 
       /* There are 3 cases for choosing the new size
@@ -168,12 +176,16 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
        * 3) if there is no entry for this offset, delete everything larger than the next smallest
        */
       val newEntries =
+        //如果没有消息的位移值小于指定位移值，那么就直接从头开始
         if(slot < 0)
           0
+        //  跳到执行的位移位置
         else if(relativeOffset(idx, slot) == offset - baseOffset)
           slot
+        //  指定位移位置大于消息中所有位移，那么跳到消息位置中最大的一个的下一个位置
         else
           slot + 1
+      // 执行位置跳转
       truncateToEntries(newEntries)
     }
   }

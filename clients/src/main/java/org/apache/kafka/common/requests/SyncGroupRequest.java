@@ -27,6 +27,7 @@ import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
 
+//请求同步分区分配策略，成功则重新开启心跳
 public class SyncGroupRequest extends AbstractRequest {
 
     public static class Builder extends AbstractRequest.Builder<SyncGroupRequest> {

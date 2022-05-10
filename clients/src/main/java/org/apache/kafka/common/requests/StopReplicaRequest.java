@@ -37,6 +37,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+//告知指定 Broker 停止掉它上面的副本对象，该请求甚至还能删除副本底层的日志数据。
+// 这个请求主要用于分区副本迁移和删除主题。
 public class StopReplicaRequest extends AbstractControlRequest {
 
     public static class Builder extends AbstractControlRequest.Builder<StopReplicaRequest> {

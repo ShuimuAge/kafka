@@ -181,14 +181,22 @@ public class TopicConfig {
         "broker will not perform down-conversion for consumers expecting an older message format. The broker responds " +
         "with <code>UNSUPPORTED_VERSION</code> error for consume requests from such older clients. This configuration" +
         "does not apply to any message format conversion that might be required for replication to followers.";
-    public static final String DIDI_HA_REMOTE_CLUSTER = "didi. ha. remote. cluster" ;
-    public static final String DIDI_HA_REMOTE_CLUSTER_DOC = "This configuration controls the cluster in which the topic to be synchronized exists. ";
-    public static final String DIDI_HA_REMOTE_TOPIC = "didi.ha.remote.topic" ;
-    public static final String DIDI_HA_REMOTE_TOPIC_DOC = "This configuration controls the topic to be synchronized." ;
-    public static final String DIDI_HA_SYNC_TOPIC_PARTITIONS_ENABLED = "didi. ha. sync , topic. partitions , enabled";
+
+    /*** Didi-Kafka 灾备 1 ↓ ***/
+    //镜像集群
+    public static final String DIDI_HA_REMOTE_CLUSTER = "didi.ha.remote.cluster";
+    public static final String DIDI_HA_REMOTE_CLUSTER_DOC = "This configuration controls the cluster in which the topic to be synchronized exists.";
+    //镜像Topic
+    public static final String DIDI_HA_REMOTE_TOPIC = "didi.ha.remote.topic";
+    public static final String DIDI_HA_REMOTE_TOPIC_DOC = "This configuration controls the topic to be synchronized.";
+    //是否同步Topic
+    public static final String DIDI_HA_SYNC_TOPIC_PARTITIONS_ENABLED = "didi.ha.sync.topic.partitions,enabled";
     public static final String DIDI_HA_SYNC_TOPIC_PARTITIONS_ENABLED_DOC = "This configuration controls whether the topic partitions are to be synchronized." ;
-    public static final String DIDI_HA_SYNC_TOPIC_CONFIGS_ENABLED = "didi. ha . sync. topic. configs. enabled";
+    //是否同步Topic配置信息
+    public static final String DIDI_HA_SYNC_TOPIC_CONFIGS_ENABLED = "didi.ha.sync.topic.configs.enabled";
     public static final String DIDI_HA_SYNC_TOPIC_CONFIGS_ENABLED_DOC = "This configuration controls whether the topic configs are to be synchronized.";
-    public static final String DIDI_HA_SYNC_TOPIC_ACLS_ENABLED = "didi. ha. sync . topic. acls. enabled" ;
+    //是否同步Topic的Acl策略
+    public static final String DIDI_HA_SYNC_TOPIC_ACLS_ENABLED = "didi.ha.sync.topic.acls.enabled";
     public static final String DIDI_HA_SYNC_TOPIC_ACLS_ENABLED_DOC = "This configuration controls whether the topic acls are to be synchronized.";
+    /*** Didi-Kafka 灾备 1 ↑ ***/
 }

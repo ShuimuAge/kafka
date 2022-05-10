@@ -64,8 +64,10 @@ object BrokerEndPoint {
  */
 case class BrokerEndPoint(id: Int, host: String, port: Int) {
 
-  // mirror cluster id
+  // Didi-Kafka 灾备 1
+  // 镜像集群名
   var remoteCluster: Option[String] = None
+  // 镜像集群配置
   var mirrorConfig: Option[HAClusterConfig] = None
 
   def connectionString(): String = formatAddress(host, port)

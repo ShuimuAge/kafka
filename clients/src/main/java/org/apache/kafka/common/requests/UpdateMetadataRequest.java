@@ -39,6 +39,8 @@ import java.util.Map;
 
 import static java.util.Collections.singletonList;
 
+//更新Broker上的元数据。
+//集群上的所有元数据变更都首先发生在 Controller 端，然后再经由这个请求广播给集群上的所有 Broker
 public class UpdateMetadataRequest extends AbstractControlRequest {
 
     public static class Builder extends AbstractControlRequest.Builder<UpdateMetadataRequest> {

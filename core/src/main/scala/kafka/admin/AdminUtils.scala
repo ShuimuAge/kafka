@@ -100,9 +100,10 @@ object AdminUtils extends Logging {
    *                                 assign each replica to a unique rack.
    *
    */
-  def assignReplicasToBrokers(brokerMetadatas: Seq[BrokerMetadata],
-                              nPartitions: Int,
-                              replicationFactor: Int,
+  //为partition的副本分配broker，返回 partitionId -> replicaIds集合 的映射
+  def assignReplicasToBrokers(brokerMetadatas: Seq[BrokerMetadata],   //alive brokers 的元数据集合
+                              nPartitions: Int,                       //partition数
+                              replicationFactor: Int,                 //partition的副本数
                               fixedStartIndex: Int = -1,
                               startPartitionId: Int = -1): Map[Int, Seq[Int]] = {
     if (nPartitions <= 0)

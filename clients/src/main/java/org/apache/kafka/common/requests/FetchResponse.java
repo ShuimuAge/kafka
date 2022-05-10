@@ -78,7 +78,7 @@ public class FetchResponse<T extends BaseRecords> extends AbstractResponse {
     private static final String PARTITIONS_KEY_NAME = "partition_responses";
 
     // partition level fields
-    //leader副本返回follower响应时带上自己的HW
+    //leader副本返回follower副本消息响应时带上自己的HW
     private static final Field.Int64 HIGH_WATERMARK = new Field.Int64("high_watermark",
             "Last committed offset.");
     private static final Field.Int64 LOG_START_OFFSET = new Field.Int64("log_start_offset",
@@ -270,6 +270,12 @@ public class FetchResponse<T extends BaseRecords> extends AbstractResponse {
         }
     }
 
+    //FetchResponse是封装的FETCH请求的响应类，
+    // FetchResponse.PartitionData是一个嵌套类，
+    // 表示响应中单个分区的拉取信息，包括:
+    //  1.对应Leader副本的高水位:highWatermark，
+    //  2.分区日志的起始偏移量:logStartOffset，
+    //  3.拉取到的消息集合等:records。
     public static final class PartitionData<T extends BaseRecords> {
         public final Errors error;
         public final long highWatermark;

@@ -84,6 +84,7 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * This class is not thread safe!
  */
+/** 对java.nio.Selector的封装，发送请求，接收响应，处理连接完成以及现有的断开连接都是通过它的poll()方法调用完成的 */
 public class Selector implements Selectable, AutoCloseable {
 
     public static final long NO_IDLE_TIMEOUT_MS = -1;
@@ -440,6 +441,7 @@ public class Selector implements Selectable, AutoCloseable {
      * @throws IllegalStateException If a send is given for which we have no existing connection or for which there is
      *         already an in-progress send
      */
+    /** 发送请求，接收响应，处理连接完成以及现有的断开连接都是通过Selector的poll()方法调用完成的 */
     @Override
     public void poll(long timeout) throws IOException {
         if (timeout < 0)

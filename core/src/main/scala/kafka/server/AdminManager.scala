@@ -56,6 +56,13 @@ class AdminManager(val config: KafkaConfig,
   private val topicPurgatory = DelayedOperationPurgatory[DelayedOperation]("topic", config.brokerId)
   private val adminZkClient = new AdminZkClient(zkClient)
 
+  // create.topic.policy.class.name 配置
+  /**
+   * createTopicPolicy根据Broker是否配置了创建Topic的自定义校验策略进行使用;
+   * 使用方式是自定义实现org.apache.kafka.server.policy.CreateTopicPolicy接口;
+   * 并在服务器配置 create.topic.policy.class.name=自定义类;
+   * 比如我就想所有创建Topic的请求分区数都要大于10; 那么这里就可以实现你的需求了
+   */
   private val createTopicPolicy =
     Option(config.getConfiguredInstance(KafkaConfig.CreateTopicPolicyClassNameProp, classOf[CreateTopicPolicy]))
 
@@ -64,7 +71,9 @@ class AdminManager(val config: KafkaConfig,
 
   def hasDelayedTopicOperations = topicPurgatory.numDelayed != 0
 
+  //partition数，由 num.partitions 配置，默认为1
   private val defaultNumPartitions = config.numPartitions.intValue()
+  //partition的副本数，由 default.replication.factor 配置，默认为1
   private val defaultReplicationFactor = config.defaultReplicationFactor.shortValue()
 
   /**
@@ -80,9 +89,17 @@ class AdminManager(val config: KafkaConfig,
     * Create topics and wait until the topics have been completely created.
     * The callback function will be triggered either when timeout, error or the topics are created.
     */
+  //创建主题并等待主题完全创建,回调函数将会在超时、错误、或者主题创建完成时触发
+  /**
+   * TODO-ssy
+   * 1. 向zookeeper中写入topic的元数据信息：
+   *    i. 创建 "/config/topics/<topic>" 节点，写入config信息
+   *    ii. 创建 "/brokers/topics/<topic>" 节点，写入topic的分区副本分配方案
+   * 2. 将Topic创建请求加入延迟处理队列
+   */
   def createTopics(timeout: Int,
-                   validateOnly: Boolean,
-                   toCreate: Map[String, CreatableTopic],
+                   validateOnly: Boolean,                                           //若 validateOnly = true，则只是校验创建会不会有效，不会进行实际创建过程
+                   toCreate: Map[String, CreatableTopic],                           //待创建Topics (Topic名 -> topic详细信息) 映射
                    includeConfigsAndMetatadata: Map[String, CreatableTopicResult],
                    responseCallback: Map[String, ApiError] => Unit): Unit = {
 
@@ -90,6 +107,8 @@ class AdminManager(val config: KafkaConfig,
     val brokers = metadataCache.getAliveBrokers.map { b => kafka.admin.BrokerMetadata(b.id, b.rack) }
     val metadata = toCreate.values.map(topic =>
       try {
+        //做一些校验检查:
+        //i. 检查 Topic 是否已存在
         if (metadataCache.contains(topic.name))
           throw new TopicExistsException(s"Topic '${topic.name}' already exists.")
 
@@ -97,19 +116,24 @@ class AdminManager(val config: KafkaConfig,
         topic.configs.asScala.foreach { entry =>
           configs.setProperty(entry.name, entry.value)
         }
+        //ii. 检查给该Topic的配置是否都合法
         LogConfig.validate(configs)
 
+        /** --replica-assignment参数和 (--partitions	或 --replication-factor ) 不能同时使用，否则报异常 */
         if ((topic.numPartitions != NO_NUM_PARTITIONS || topic.replicationFactor != NO_REPLICATION_FACTOR)
             && !topic.assignments().isEmpty) {
           throw new InvalidRequestException("Both numPartitions or replicationFactor and replicasAssignments were set. " +
             "Both cannot be used at the same time.")
         }
 
+        //partition数，默认为1
         val resolvedNumPartitions = if (topic.numPartitions == NO_NUM_PARTITIONS)
           defaultNumPartitions else topic.numPartitions
+        //partition的副本数，默认为1
         val resolvedReplicationFactor = if (topic.replicationFactor == NO_REPLICATION_FACTOR)
           defaultReplicationFactor else topic.replicationFactor
 
+        /** 计算该Topic的partitions分的副本分配方案( partitionId -> replicaIds(即brokerId)集合 的映射) */
         val assignments = if (topic.assignments().isEmpty) {
           AdminUtils.assignReplicasToBrokers(
             brokers, resolvedNumPartitions, resolvedReplicationFactor)
@@ -125,6 +149,7 @@ class AdminManager(val config: KafkaConfig,
         }
         trace(s"Assignments for topic $topic are $assignments ")
 
+        //Broker是否配置了创建Topic的自定义校验策略(在服务器配置 create.topic.policy.class.name=自定义类)
         createTopicPolicy match {
           case Some(policy) =>
             adminZkClient.validateTopicCreate(topic.name(), assignments, configs)
@@ -149,10 +174,14 @@ class AdminManager(val config: KafkaConfig,
             if (!validateOnly)
               adminZkClient.createTopicWithAssignment(topic.name, configs, assignments)
 
+          //TODO-ssy 若未配置 create.topic.policy.class.name
           case None =>
             if (validateOnly)
+              //校验创建topic的参数准确性,即检查topic创建是否有效
+              //比如topic名称是否合法，是否已经存在或者是否副本分配信息有误等等
               adminZkClient.validateTopicCreate(topic.name, assignments, configs)
             else
+              /** 把topic相关数据写入到zk中 */
               adminZkClient.createTopicWithAssignment(topic.name, configs, assignments)
         }
 
@@ -256,19 +285,23 @@ class AdminManager(val config: KafkaConfig,
     }
   }
 
-  def createPartitions(timeout: Int,
-                       newPartitions: Seq[CreatePartitionsTopic],
-                       validateOnly: Boolean,
+  //为newPartitions 中 CreatePartitionsTopic.name 指定的 Topic 补充分区以满足 CreatePartitionsTopic.count的数量要求
+  def createPartitions(timeout: Int,                               //timeout <= 0 则不做真正添加处理
+                       newPartitions: Seq[CreatePartitionsTopic],  //需要增加partition的Topic及更新后的partition数等信息
+                       validateOnly: Boolean,                      //若 validateOnly = true 则不做真正添加处理
                        listenerName: ListenerName,
                        callback: Map[String, ApiError] => Unit): Unit = {
 
+    //获取Broker的机架信息
     val allBrokers = adminZkClient.getBrokerMetadatas()
     val allBrokerIds = allBrokers.map(_.id)
 
     // 1. map over topics creating assignment and calling AdminUtils
-    val metadata = newPartitions.map { newPartition =>
+    /** 遍历每个 CreatePartitionsTopic，为每个Topic打包一个createPartitionsMetadata，存储其新partition集合 */
+    val metadata = newPartitions.map{ newPartition =>
       val topic = newPartition.name
       try {
+        //向zk的"/brokers/topics/<topic>"节点获取该topic的分区及分区副本分配列表
         val existingAssignment = zkClient.getFullReplicaAssignmentForTopics(immutable.Set(topic)).map {
           case (topicPartition, assignment) =>
             if (assignment.isBeingReassigned) {
@@ -281,38 +314,52 @@ class AdminManager(val config: KafkaConfig,
         if (existingAssignment.isEmpty)
           throw new UnknownTopicOrPartitionException(s"The topic '$topic' does not exist.")
 
+        //目标Topic的旧分区数
         val oldNumPartitions = existingAssignment.size
+        //目标Topic的新分区数
         val newNumPartitions = newPartition.count
+        //需要增加的分区数
         val numPartitionsIncrement = newNumPartitions - oldNumPartitions
+        //若新分区数小于旧分区数，不能减少Topic分区，返回异常
         if (numPartitionsIncrement < 0) {
           throw new InvalidPartitionsException(
             s"Topic currently has $oldNumPartitions partitions, which is higher than the requested $newNumPartitions.")
-        } else if (numPartitionsIncrement == 0) {
+        }
+        //若新分区数等于旧分区数，不需要增加操作，返回异常
+        else if (numPartitionsIncrement == 0) {
           throw new InvalidPartitionsException(s"Topic already has $oldNumPartitions partitions.")
         }
 
+        //若新分区数大于旧分区数，说明可以增加分区
         val newPartitionsAssignment = Option(newPartition.assignments)
           .map { assignmentMap =>
+            //该Topic待增加的partition可以分配在哪些broker上
             val assignments = assignmentMap.asScala.map {
               createPartitionAssignment => createPartitionAssignment.brokerIds.asScala.map(_.toInt)
             }
+            //若其中存在未知broker，返回异常
             val unknownBrokers = assignments.flatten.toSet -- allBrokerIds
             if (unknownBrokers.nonEmpty)
               throw new InvalidReplicaAssignmentException(
                 s"Unknown broker(s) in replica assignment: ${unknownBrokers.mkString(", ")}.")
 
+            //提供的broker数需要和待增加的partitions数匹配
             if (assignments.size != numPartitionsIncrement)
               throw new InvalidReplicaAssignmentException(
                 s"Increasing the number of partitions by $numPartitionsIncrement " +
                   s"but ${assignments.size} assignments provided.")
 
+            //新partition -> 该partition的副本分配 映射
+            //从已有partition总数开始分配新的partitionId(如原来有3个分区，就从3开始分配)
             assignments.zipWithIndex.map { case (replicas, index) =>
               existingAssignment.size + index -> replicas
             }.toMap
         }
 
+        /** 计算添加分区后该Topic上 分区 -> 分区副本分配情况 映射 */
         val updatedReplicaAssignment = adminZkClient.addPartitions(topic, existingAssignment, allBrokers,
           newPartition.count, newPartitionsAssignment, validateOnly = validateOnly)
+        /** 为每个Topic打包一个createPartitionsMetadata，存储其新partition集合 */
         CreatePartitionsMetadata(topic, updatedReplicaAssignment.keySet, ApiError.NONE)
       } catch {
         case e: AdminOperationException =>
@@ -323,6 +370,7 @@ class AdminManager(val config: KafkaConfig,
     }
 
     // 2. if timeout <= 0, validateOnly or no topics can proceed return immediately
+    //出现异常则返回
     if (timeout <= 0 || validateOnly || !metadata.exists(_.error.is(Errors.NONE))) {
       val results = metadata.map { createPartitionMetadata =>
         // ignore topics that already have errors
@@ -333,7 +381,9 @@ class AdminManager(val config: KafkaConfig,
         }
       }.toMap
       callback(results)
-    } else {
+    }
+    /** TODO-ssy 若无异常，将createPartition请求加入延迟处理队列，等待创建 */
+    else {
       // 3. else pass the assignments and errors to the delayed operation and set the keys
       val delayedCreate = new DelayedCreatePartitions(timeout, metadata, this, callback)
       val delayedCreateKeys = newPartitions.map(createPartitionTopic => TopicKey(createPartitionTopic.name))

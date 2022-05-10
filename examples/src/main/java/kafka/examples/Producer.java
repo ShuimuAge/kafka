@@ -28,6 +28,7 @@ import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 
+//整个生产者的入口，它其实就是一个线程类
 public class Producer extends Thread {
     private final KafkaProducer<Integer, String> producer;
     private final String topic;
@@ -43,16 +44,23 @@ public class Producer extends Thread {
                     final int transactionTimeoutMs,
                     final CountDownLatch latch) {
         Properties props = new Properties();
+        // 服务器地址 bootstrap.servers => localhost:9092
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, KafkaProperties.KAFKA_SERVER_URL + ":" + KafkaProperties.KAFKA_SERVER_PORT);
+        // 客户端ID（每个客户端唯一） client.id => DemoProducer
         props.put(ProducerConfig.CLIENT_ID_CONFIG, "DemoProducer");
+        // 消息的 Key 的序列化方式
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, IntegerSerializer.class.getName());
+        // 消息的 Value 的序列化方式
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
+        // 发送消息超时时间
         if (transactionTimeoutMs > 0) {
             props.put(ProducerConfig.TRANSACTION_TIMEOUT_CONFIG, transactionTimeoutMs);
         }
+        // 事务ID
         if (transactionalId != null) {
             props.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionalId);
         }
+        // 是否启动幂等性 false
         props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, enableIdempotency);
 
         producer = new KafkaProducer<>(props);

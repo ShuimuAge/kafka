@@ -756,6 +756,7 @@ public class Sender implements Runnable {
     /**
      * Wake up the selector associated with this send thread
      */
+    /** 唤醒 sender 线程，sender 线程又会去唤醒 NetworkClient 线程 线程进行一些实际的操作 */
     public void wakeup() {
         this.client.wakeup();
     }

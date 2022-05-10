@@ -38,6 +38,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+//告诉 Broker 相关主题各个分区的 Leader 副本位于哪台 Broker 上、ISR 中的副本都在哪些 Broker 上
 public class LeaderAndIsrRequest extends AbstractControlRequest {
 
     public static class Builder extends AbstractControlRequest.Builder<LeaderAndIsrRequest> {

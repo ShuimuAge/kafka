@@ -48,14 +48,18 @@ import static org.apache.kafka.common.requests.FetchMetadata.INVALID_SESSION_ID;
 public class FetchRequest extends AbstractRequest {
     public static final int CONSUMER_REPLICA_ID = -1;
 
+    //所要拉取的主题信息，注意这是一个数组类型
     private static final Field.ComplexArray TOPICS = new Field.ComplexArray("topics",
             "Topics to fetch in the order provided.");
+    //数组类型，指定从fetch session中指定要去除的拉取信息，详细参考下面的释义
     private static final Field.ComplexArray FORGOTTEN_TOPICS = new Field.ComplexArray("forgotten_topics_data",
             "Topics to remove from the fetch session.");
+    //和消费者客户端参数fetch.max.bytes对应，默认值为52428800，即50MB
     private static final Field.Int32 MAX_BYTES = new Field.Int32("max_bytes",
             "Maximum bytes to accumulate in the response. Note that this is not an absolute maximum, " +
                     "if the first message in the first non-empty partition of the fetch is larger than this " +
                     "value, the message will still be returned to ensure that progress can be made.");
+    //和消费者客户端参数isolation.level对应，默认值为“read_uncommitted”，可选值为“read_committed”，这两个值分别对应本域的0和1的值
     private static final Field.Int8 ISOLATION_LEVEL = new Field.Int8("isolation_level",
             "This setting controls the visibility of transactional records. Using READ_UNCOMMITTED " +
                     "(isolation_level = 0) makes all records visible. With READ_COMMITTED (isolation_level = 1), " +
@@ -63,25 +67,33 @@ public class FetchRequest extends AbstractRequest {
                     "READ_COMMITTED returns all data from offsets smaller than the current LSO (last stable offset), " +
                     "and enables the inclusion of the list of aborted transactions in the result, which allows " +
                     "consumers to discard ABORTED transactional records");
+    //fetch session的id，详细参考下面的释义
     private static final Field.Int32 SESSION_ID = new Field.Int32("session_id", "The fetch session ID");
+    //fetch session的epoch纪元，它和seesion_id一样都是fetch session的元数据，详细参考下面的释义
     private static final Field.Int32 SESSION_EPOCH = new Field.Int32("session_epoch", "The fetch session epoch");
     private static final Field.Str RACK_ID = new Field.Str("rack_id", "The consumer's rack id");
 
     // topic level fields
+    //分区信息，注意这也是一个数组类型
     private static final Field.ComplexArray PARTITIONS = new Field.ComplexArray("partitions",
             "Partitions to fetch.");
 
     // partition level fields
+    //用来指定follower副本的brokerId，这个域是用于follower副本向leader副本发起FetchRequest请求的，对于普通消费者客户端而言，这个域的值保持为-1
     private static final Field.Int32 REPLICA_ID = new Field.Int32("replica_id",
             "Broker id of the follower. For normal consumers, use -1.");
-    //follower 副本向leader副本拉取数据时，在拉取的请求FetchRequest中带上自己的LEO信息，就是fetch_offset
+    //指定从分区的哪个位置开始读取消息。如果是follower副本发起的请求，那么这个域可以看作当前follower副本的LEO
+    //即 follower 副本向leader副本拉取数据时，在拉取的请求FetchRequest中带上自己的LEO信息，就是fetch_offset
     private static final Field.Int64 FETCH_OFFSET = new Field.Int64("fetch_offset", "Message offset.");
     private static final Field.Int32 PARTITION_MAX_BYTES = new Field.Int32("partition_max_bytes",
             "Maximum bytes to fetch.");
+    //和消费者客户端参数fetch.max.wait.ms对应，默认值为500
     private static final Field.Int32 MAX_WAIT_TIME = new Field.Int32("max_wait_time",
             "Maximum time in ms to wait for the response.");
+    //和消费者客户端参数fetch.min.bytes对应，默认值为1
     private static final Field.Int32 MIN_BYTES = new Field.Int32("min_bytes",
             "Minimum bytes to accumulate in the response.");
+    //该域专门用于follower副本发起的FetchRequest请求，用来指明分区的起始偏移量。对于普通消费者客户端而言这个值保持为-1
     private static final Field.Int64 LOG_START_OFFSET = new Field.Int64("log_start_offset",
             "Earliest available offset of the follower replica. " +
                     "The field is only used when request is sent by follower. ");
@@ -237,10 +249,10 @@ public class FetchRequest extends AbstractRequest {
     private final String rackId;
 
     public static final class PartitionData {
-        public final long fetchOffset;
-        public final long logStartOffset;
-        public final int maxBytes;
-        public final Optional<Integer> currentLeaderEpoch;
+        public final long fetchOffset;                      //Follower副本的 LEO
+        public final long logStartOffset;                   //Follower副本的 LogStartOffset
+        public final int maxBytes;                          //最大Fetch字节数
+        public final Optional<Integer> currentLeaderEpoch;  //follower保存的当前leader的epoch
 
         public PartitionData(long fetchOffset, long logStartOffset, int maxBytes, Optional<Integer> currentLeaderEpoch) {
             this.fetchOffset = fetchOffset;

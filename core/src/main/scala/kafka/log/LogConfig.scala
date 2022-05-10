@@ -66,6 +66,7 @@ object Defaults {
   val MaxIdMapSnapshots = kafka.server.Defaults.MaxIdMapSnapshots
   val MessageDownConversionEnable = kafka.server.Defaults.MessageDownConversionEnable
 
+  // Didi-Kafka 灾备 1
   val DidiHASyncTopicPartitionsEnabled = kafka.server.Defaults.DiDiHASyncTopicPartitionsEnabled
   val DidiHASyncTopicConfigsEnabled = kafka.server.Defaults.DiDiHASyncTopicConfigsEnabled
   val DidiHASyncTopicAclsEnabled = kafka.server.Defaults.DiDiHASyncTopicAclsEnabled
@@ -147,12 +148,14 @@ object LogConfig {
   val MessageTimestampDifferenceMaxMsProp = TopicConfig.MESSAGE_TIMESTAMP_DIFFERENCE_MAX_MS_CONFIG
   val MessageDownConversionEnableProp = TopicConfig.MESSAGE_DOWNCONVERSION_ENABLE_CONFIG
 
+  /*** Didi-Kafka 灾备 1 ↓ ***/
   //For KM
   val DidiHARemoteClusterProp = TopicConfig.DIDI_HA_REMOTE_CLUSTER
   val DidiHARemoteTopicProp = TopicConfig.DIDI_HA_REMOTE_TOPIC
   val DidiHASyncTopicPartitionsPropEnabled = TopicConfig.DIDI_HA_SYNC_TOPIC_PARTITIONS_ENABLED
   val DidiHASyncTopicConfigsPropEnabled = TopicConfig.DIDI_HA_SYNC_TOPIC_CONFIGS_ENABLED
   val DidiHASyncTopicAclsPropEnabled = TopicConfig.DIDI_HA_SYNC_TOPIC_ACLS_ENABLED
+  /*** Didi-Kafka 灾备 1 ↑ ***/
 
   // Leave these out of TopicConfig for now as they are replication quota configs
   val LeaderReplicationThrottledReplicasProp = "leader.replication.throttled.replicas"
@@ -182,11 +185,13 @@ object LogConfig {
   val MessageTimestampTypeDoc = TopicConfig.MESSAGE_TIMESTAMP_TYPE_DOC
   val MessageTimestampDifferenceMaxMsDoc = TopicConfig.MESSAGE_TIMESTAMP_DIFFERENCE_MAX_MS_DOC
   val MessageDownConversionEnableDoc = TopicConfig.MESSAGE_DOWNCONVERSION_ENABLE_DOC
+  /*** Didi-Kafka 灾备 1 ↓ ***/
   val DidiHARemoteClusterDoc = TopicConfig.DIDI_HA_REMOTE_CLUSTER_DOC
   val DidiHARemoteTopicDoc = TopicConfig.DIDI_HA_REMOTE_TOPIC_DOC
   val DidiHASyncTopicPartitionsEnabledDoc = TopicConfig.DIDI_HA_SYNC_TOPIC_PARTITIONS_ENABLED_DOC
   val DidiHASyncTopicConfigsEnabledDoc = TopicConfig.DIDI_HA_SYNC_TOPIC_CONFIGS_ENABLED_DOC
   val DidiHASyncTopicAclsEnabledDoc = TopicConfig.DIDI_HA_SYNC_TOPIC_ACLS_ENABLED_DOC
+  /*** Didi-Kafka 灾备 1 ↑ ***/
 
   val LeaderReplicationThrottledReplicasDoc = "A list of replicas for which log replication should be throttled on " +
     "the leader side. The list should describe a set of replicas in the form " +
@@ -307,6 +312,7 @@ object LogConfig {
         FollowerReplicationThrottledReplicasDoc, FollowerReplicationThrottledReplicasProp)
       .define(MessageDownConversionEnableProp, BOOLEAN, Defaults.MessageDownConversionEnable, LOW,
         MessageDownConversionEnableDoc, KafkaConfig.LogMessageDownConversionEnableProp)
+      /*** Didi-Kafka 灾备 1 ↓ ***/
       .define(DidiHARemoteClusterProp, STRING, null, LOW, DidiHARemoteClusterDoc, null)
       .define(DidiHARemoteTopicProp, STRING, null, LOW, DidiHARemoteTopicDoc, null)
       .define(DidiHASyncTopicPartitionsPropEnabled, BOOLEAN, Defaults.DidiHASyncTopicPartitionsEnabled,
@@ -315,6 +321,7 @@ object LogConfig {
         DidiHASyncTopicConfigsEnabledDoc, null)
       .define(DidiHASyncTopicAclsPropEnabled, BOOLEAN, Defaults.DidiHASyncTopicAclsEnabled, LOW,
         DidiHASyncTopicAclsEnabledDoc, null)
+      /*** Didi-Kafka 灾备 1 ↑ ***/
   }
 
   def apply(): LogConfig = LogConfig(new Properties())
@@ -341,6 +348,7 @@ object LogConfig {
   /**
    * Check that property names are valid
    */
+  //校验配置名是否在合法配置里面
   def validateNames(props: Properties): Unit = {
     val names = configNames
     for (name <- props.asScala.keys)
@@ -350,6 +358,7 @@ object LogConfig {
 
   private[kafka] def configKeys: Map[String, ConfigKey] = configDef.configKeys.asScala
 
+  //校验部分配置的值是否合法
   def validateValues(props: java.util.Map[_, _]): Unit = {
     val minCompactionLag = props.get(MinCompactionLagMsProp).asInstanceOf[Long]
     val maxCompactionLag = props.get(MaxCompactionLagMsProp).asInstanceOf[Long]
@@ -367,7 +376,7 @@ object LogConfig {
     val valueMaps = configDef.parse(props)
     validateValues(valueMaps)
   }
-
+  // Didi-Kafka 灾备 1
   def getRealConfigs(props: Properties): Map[String, Object] = {
     configDef.parse(props).asScala
   }

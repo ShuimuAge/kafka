@@ -242,8 +242,10 @@ public class Fetcher<K, V> implements Closeable {
      */
     public synchronized int sendFetches() {
         // Update metrics in case there was an assignment change
+        // 更新分配的分区
         sensors.maybeUpdateAssignment(subscriptions);
 
+        // 获取分配的分区，即subscriptions字段
         Map<Node, FetchSessionHandler.FetchRequestData> fetchRequestMap = prepareFetchRequests();
         for (Map.Entry<Node, FetchSessionHandler.FetchRequestData> entry : fetchRequestMap.entrySet()) {
             final Node fetchTarget = entry.getKey();
@@ -259,6 +261,7 @@ public class Fetcher<K, V> implements Closeable {
             if (log.isDebugEnabled()) {
                 log.debug("Sending {} {} to broker {}", isolationLevel, data.toString(), fetchTarget);
             }
+            // fetchTarget是要拉取的分区节点
             RequestFuture<ClientResponse> future = client.send(fetchTarget, request);
             // We add the node to the set of nodes with pending fetch requests before adding the
             // listener because the future may have been fulfilled on another thread (e.g. during a

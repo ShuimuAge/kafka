@@ -86,6 +86,7 @@ import static org.apache.kafka.clients.consumer.CooperativeStickyAssignor.COOPER
 /**
  * This class manages the coordination process with the consumer coordinator.
  */
+//客户端Coordinator，负责与服务端通信
 public final class ConsumerCoordinator extends AbstractCoordinator {
     private final GroupRebalanceConfig rebalanceConfig;
     private final Logger log;
@@ -329,6 +330,8 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
     }
 
     @Override
+    //更新leader分配的分区partition
+    //拿到GroupCoordinator的分区分配结果后，由方法onJoinComplete()执行处理
     protected void onJoinComplete(int generation,
                                   String memberId,
                                   String assignmentStrategy,
@@ -339,6 +342,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         if (!isLeader)
             assignmentSnapshot = null;
 
+        // 根据分区策略获取对应分区分配器
         ConsumerPartitionAssignor assignor = lookupAssignor(assignmentStrategy);
         if (assignor == null)
             throw new IllegalStateException("Coordinator selected invalid assignment protocol: " + assignmentStrategy);
@@ -346,6 +350,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         // Give the assignor a chance to update internal state based on the received assignment
         groupMetadata = new ConsumerGroupMetadata(rebalanceConfig.groupId, generation, memberId, rebalanceConfig.groupInstanceId);
 
+        //获取之前分配给自己消费的partition
         Set<TopicPartition> ownedPartitions = new HashSet<>(subscriptions.assignedPartitions());
 
         // should at least encode the short version
@@ -355,10 +360,13 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                 "it is possible that the leader's assign function is buggy and did not return any assignment for this member, " +
                 "or because static member is configured and the protocol is buggy hence did not get the assignment for this member");
 
+        // 获取分区结果
         Assignment assignment = ConsumerProtocol.deserializeAssignment(assignmentBuffer);
 
+        //获取新分配给自己消费的partition
         Set<TopicPartition> assignedPartitions = new HashSet<>(assignment.partitions());
 
+        // 更新分配的分区partition
         if (!subscriptions.checkAssignmentMatchedSubscription(assignedPartitions)) {
             log.warn("We received an assignment {} that doesn't match our current subscription {}; it is likely " +
                 "that the subscription has changed since we joined the group. Will try re-join the group with current subscription",
@@ -455,11 +463,16 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
      * @throws KafkaException if the rebalance callback throws an exception
      * @return true iff the operation succeeded
      */
+    // 获取组协调器groupCoordinator
     public boolean poll(Timer timer, boolean waitForJoinGroup) {
         maybeUpdateSubscriptionMetadata();
 
+        // 触发执行注册的监听 offset 提交完成的方法
         invokeCompletedOffsetCommitCallbacks();
 
+        //一般都是subscribe自动分配分区，不用看else模块
+        // 确保当前订阅模式是 AUTO_TOPICS 或 AUTO_PATTERN（USER_ASSIGNED 固定了分配分区，不需要再平衡），
+        // 且目标 GroupCoordinator 节点可达，如果不可达，则会尝试寻找一个可用的节点
         if (subscriptions.hasAutoAssignedPartitions()) {
             if (protocol == null) {
                 throw new IllegalStateException("User configured " + ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG +
@@ -467,15 +480,21 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
             }
             // Always update the heartbeat last poll time so that the heartbeat thread does not leave the
             // group proactively due to application inactivity even if (say) the coordinator cannot be found.
+            //检查心跳线程运行是否正常, 如果心跳线程运行失败, 则抛出异常; 反之更新poll 调用的时间
             pollHeartbeat(timer.currentTimeMs());
+            //TODO-ssy 尝试确保coordinator准备好接收请求
+            //若 groupCoordinator 尚不存在则尝试 groupCoordinator，若初始化过期则返回FALSE
             if (coordinatorUnknown() && !ensureCoordinatorReady(timer)) {
                 return false;
             }
 
+            // 判定是否需要执行rebalance操作，是否需要重新加入消费组
             if (rejoinNeededOrPending()) {
                 // due to a race condition between the initial metadata fetch and the initial rebalance,
                 // we need to ensure that the metadata is fresh before joining initially. This ensures
                 // that we have matched the pattern against the cluster's topics at least once before joining.
+                // 因为初始化的metadata刷新和初始化Rebalance存在竞态条件，在这里要确保metadata刷新在前面。
+                // 这样可以保证在入组之前订阅主题和Broker主题至少有一次匹配的过程。
                 if (subscriptions.hasPatternSubscription()) {
                     // For consumer group that uses pattern-based subscription, after a topic is created,
                     // any consumer that discovers the topic after metadata refresh can trigger rebalance
@@ -484,6 +503,8 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                     // reduce the number of rebalances caused by single topic creation by asking consumer to
                     // refresh metadata before re-joining the group as long as the refresh backoff time has
                     // passed.
+                    // 对于模式匹配订阅的Consumer，当一个Topic创建后，任何Consumer通过刷新metadata后发现新Topic后，
+                    // 都会触发一次Rebalance。因此此时可能会有大量的Rebalance操作，通过下面的backoff time判断会显著降低Rebalance的频率
                     if (this.metadata.timeToAllowUpdate(timer.currentTimeMs()) == 0) {
                         this.metadata.requestUpdate();
                     }
@@ -496,6 +517,15 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                 }
 
                 // if not wait for join group, we would just use a timer of 0
+                /**
+                 * TODO-ssy
+                 * 1. 检查目标 GroupCoordinator 节点是否准备好接收请求
+                 * 2. 启动心跳线程
+                 * 3. 执行分区rebalance操作
+                 */
+                // ensureActiveGroup 执行具体的分区再分配操作
+                // 会调用AbstractCoordinator.sendFindCoordinatorRequest 方法，向集群中负载最小的节点发送 FindCoordinatorRequest 请求
+                // 可能调用AbstractCoordinator.sendJoinGroupRequest 方法向消费者组对应的 GroupCoordinator 所在节点发送JoinGroupRequest 请求
                 if (!ensureActiveGroup(waitForJoinGroup ? timer : time.timer(0L))) {
                     return false;
                 }
@@ -512,7 +542,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                 client.awaitMetadataUpdate(timer);
             }
         }
-
+        // 异步提交 offset
         maybeAutoCommitOffsetsAsync(timer.currentTimeMs());
         return true;
     }
@@ -544,6 +574,9 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
     }
 
     @Override
+    //TODO-ssy 具体执行给所有消费者分配消费分区的方法
+    //该方法根据响应中的分区分配策略的名称，创建对应的 PartitionAssignor 接口的实例对象，
+    // 然后获取消费者订阅的主题，并调用 assign 方法执行消费分区分配
     protected Map<String, ByteBuffer> performAssignment(String leaderId,
                                                         String assignmentStrategy,
                                                         List<JoinGroupResponseData.JoinGroupResponseMember> allSubscriptions) {
@@ -574,6 +607,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
         log.debug("Performing assignment using strategy {} with subscriptions {}", assignorName, subscriptions);
 
+        //根据分区分配策略进行partitions分配给消费组中每个member
         Map<String, Assignment> assignments = assignor.assign(metadata.fetch(), new GroupSubscription(subscriptions)).groupAssignment();
 
         // skip the validation for built-in cooperative sticky assignor since we've considered
@@ -752,23 +786,28 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
      * @throws KafkaException if the callback throws exception
      */
     @Override
+    // TODO-ssy 判定是否需要执行rebalance操作
     public boolean rejoinNeededOrPending() {
+        // USER_ASSIGNED 订阅模式不需要执行分区再分配
         if (!subscriptions.hasAutoAssignedPartitions())
             return false;
 
         // we need to rejoin if we performed the assignment and metadata has changed;
         // also for those owned-but-no-longer-existed partitions we should drop them as lost
+        // 若再平衡过程中分区数量发生变化
         if (assignmentSnapshot != null && !assignmentSnapshot.matches(metadataSnapshot)) {
             requestRejoin();
             return true;
         }
 
         // we need to join if our subscription has changed since the last join
+        // 若消费者 topic 订阅信息发生变化
         if (joinedSubscription != null && !joinedSubscription.equals(subscriptions.subscription())) {
             requestRejoin();
             return true;
         }
 
+        // 其它标识需要再平衡的操作，例如分区再分配执行失败、重置年代信息等
         return super.rejoinNeededOrPending();
     }
 

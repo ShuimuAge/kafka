@@ -141,6 +141,8 @@ public interface ConsumerRebalanceListener {
      * @throws org.apache.kafka.common.errors.WakeupException If raised from a nested call to {@link KafkaConsumer}
      * @throws org.apache.kafka.common.errors.InterruptException If raised from a nested call to {@link KafkaConsumer}
      */
+    //在客户端停止消费消息后，在Rebalance开始前调用可以在此时提交offset信息，
+    // 保证在Rebalance后的consumer可以准确知晓Partition的消费起点
     void onPartitionsRevoked(Collection<TopicPartition> partitions);
 
     /**
@@ -166,6 +168,7 @@ public interface ConsumerRebalanceListener {
      * @throws org.apache.kafka.common.errors.WakeupException If raised from a nested call to {@link KafkaConsumer}
      * @throws org.apache.kafka.common.errors.InterruptException If raised from a nested call to {@link KafkaConsumer}
      */
+    //在Rebalance完成后调用
     void onPartitionsAssigned(Collection<TopicPartition> partitions);
 
     /**

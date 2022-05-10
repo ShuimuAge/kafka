@@ -32,6 +32,8 @@ class ReplicaFetcherManager(brokerConfig: KafkaConfig,
         clientId = "Replica",
         numFetchers = brokerConfig.numReplicaFetchers) {
 
+  //ReplicaFetcherManager.addFetcherForPartitions()方法最后是会调用次方法并启动线程
+  //该方法将创建ReplicaFetcherThread对象作为 Fetcher 线程实例
   override def createFetcherThread(fetcherId: Int, sourceBroker: BrokerEndPoint): ReplicaFetcherThread = {
     val prefix = threadNamePrefix.map(tp => s"$tp:").getOrElse("")
     val threadName = s"${prefix}ReplicaFetcherThread-$fetcherId-${sourceBroker.id}"

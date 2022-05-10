@@ -48,6 +48,7 @@ trait ConfigHandler {
   * The TopicConfigHandler will process topic config changes in ZK.
   * The callback provides the topic name and the full properties set read from ZK
   */
+// Didi-Kafka 灾备 1 - 添加TopicConfigManager参数
 class TopicConfigHandler(private val logManager: LogManager, kafkaConfig: KafkaConfig, val quotas: QuotaManagers, kafkaController: KafkaController, topicConfigManager: TopicConfigManager) extends ConfigHandler with Logging  {
 
   private def updateLogConfig(topic: String,
@@ -67,6 +68,7 @@ class TopicConfigHandler(private val logManager: LogManager, kafkaConfig: KafkaC
   }
 
   def processConfigChanges(topic: String, topicConfig: Properties): Unit = {
+    // Didi-Kafka 灾备 1
     topicConfigManager.configure(topic, topicConfig)
     // Validate the configurations.
     val configNamesToExclude = excludedConfigs(topic, topicConfig)
@@ -165,7 +167,7 @@ class ClientIdConfigHandler(private val quotaManagers: QuotaManagers) extends Qu
  * a <user, client-id> update and the full properties set read from ZK.
  */
 class UserConfigHandler(private val quotaManagers: QuotaManagers, val credentialProvider: CredentialProvider) extends QuotaConfigHandler(quotaManagers) with ConfigHandler {
-
+  // Didi-Kafka 灾备 1
   val userConfigManager = new UserConfigManager
 
   def processConfigChanges(quotaEntityPath: String, config: Properties): Unit = {
@@ -174,6 +176,7 @@ class UserConfigHandler(private val quotaManagers: QuotaManagers, val credential
     if (entities.length != 1 && entities.length != 3)
       throw new IllegalArgumentException("Invalid quota entity path: " + quotaEntityPath)
     val sanitizedUser = entities(0)
+    // Didi-Kafka 灾备 1
     userConfigManager.configure(sanitizedUser, config)
     val sanitizedClientId = if (entities.length == 3) Some(entities(2)) else None
     updateQuotaConfig(Some(sanitizedUser), sanitizedClientId, config)
@@ -182,6 +185,7 @@ class UserConfigHandler(private val quotaManagers: QuotaManagers, val credential
   }
 }
 
+// Didi-Kafka 灾备 1
 class ClusterConfigHandler() extends ConfigHandler with Logging {
   val clusterConfigManager = new ClusterConfigManager
   def processConfigChanges(clusterId: String, properties: Properties) {

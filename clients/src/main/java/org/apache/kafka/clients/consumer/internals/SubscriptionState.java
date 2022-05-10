@@ -73,6 +73,17 @@ public class SubscriptionState {
 
     private final Logger log;
 
+    //订阅状态
+    /**
+     * 1、集合订阅的方式subscribe（Collection）、
+     * 2、正则表达式订阅的方式subscribe（Pattern、
+     * 3、指定分区的订阅方式 assign（Collection）
+     * 分表代表了三种不同的订阅状态：
+     * 1、AUTO_TOPICS、
+     * 2、AUTO_PATTERN、
+     * 3、USER_ASSIGNED
+     * （如果没有订阅，那么订阅状态为NONE）。这三种状态是互斥的，在一个消费者中只能使用其中的一种，否则会报出IllegalStateException异常
+     */
     private enum SubscriptionType {
         NONE, AUTO_TOPICS, AUTO_PATTERN, USER_ASSIGNED
     }
@@ -298,6 +309,7 @@ public class SubscriptionState {
         return this.subscriptionType == SubscriptionType.AUTO_PATTERN;
     }
 
+    //验证Consumer是否有任何订阅信息。如果订阅模式为NONE，即没有订阅任何 topics，那么拉取数据也就没意义了
     public synchronized boolean hasNoSubscriptionOrUserAssignment() {
         return this.subscriptionType == SubscriptionType.NONE;
     }
@@ -402,6 +414,7 @@ public class SubscriptionState {
     /**
      * @return a modifiable copy of the currently assigned partitions
      */
+    //获取分配的partition
     public synchronized Set<TopicPartition> assignedPartitions() {
         return new HashSet<>(this.assignment.partitionSet());
     }
@@ -428,6 +441,13 @@ public class SubscriptionState {
                 .collect(Collectors.toList());
     }
 
+    // 确保当前订阅模式是 AUTO_TOPICS 或 AUTO_PATTERN（USER_ASSIGNED 不需要再平衡）
+
+    /**
+     * 当我们使用 AUTO_TOPICS 或 AUTO_PATTERN 模式订阅 Kafka topic 时，我们并不需要考虑当前消费者具体消费哪个分区，
+     * Kafka 会依据分区分配策略为消费者分配一个或多个分区进行消费（一个分区至多被一个消费者消费，不允许多个消费者同时消费同一个分区）。
+     * 但是消费者可能会中途加入，也可能会中途退出，topic 的分区数目也是允许改变的，此时就需要依赖分区再分配机制为注册的消费者重新分配分区
+     */
     public synchronized boolean hasAutoAssignedPartitions() {
         return this.subscriptionType == SubscriptionType.AUTO_TOPICS || this.subscriptionType == SubscriptionType.AUTO_PATTERN;
     }

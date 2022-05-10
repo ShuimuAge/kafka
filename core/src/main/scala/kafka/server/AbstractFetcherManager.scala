@@ -114,6 +114,13 @@ abstract class AbstractFetcherManager[T <: AbstractFetcherThread](val name: Stri
   // to be defined in subclass to create a specific fetcher
   def createFetcherThread(fetcherId: Int, sourceBroker: BrokerEndPoint): T
 
+  /**
+   * TODO-ssy
+   * 1. 在副本同步中：为分区 Follower 副本设置 Fetcher 线程，该线程用于从分区Leader副本处同步消息数据
+   * 2. 在DidiKafka灾备中：为本地分区 Leader 副本设置 Fetcher 线程，该线程用于从镜像分区Leader副本处同步消息数据
+   * 关键处理是调用内部 addAndStartFetcherThread() 方法
+   *  该方法执行子类 ReplicaFetcherManager.createFetcherThread() 方法创建 Fetcher 线程，并将其启动
+  */
   def addFetcherForPartitions(partitionAndOffsets: Map[TopicPartition, InitialFetchState]): Unit = {
     lock synchronized {
       val partitionsPerFetcher = partitionAndOffsets.groupBy { case (topicPartition, brokerAndInitialFetchOffset) =>
@@ -124,6 +131,10 @@ abstract class AbstractFetcherManager[T <: AbstractFetcherThread](val name: Stri
                                    brokerIdAndFetcherId: BrokerIdAndFetcherId): T = {
         val fetcherThread = createFetcherThread(brokerAndFetcherId.fetcherId, brokerAndFetcherId.broker)
         fetcherThreadMap.put(brokerIdAndFetcherId, fetcherThread)
+        //ReplicaFetcherThread 线程对象被创建后会立即启动
+        //触发 ReplicaFetcherThread.run() 方法执行
+        //不过这个方法实际是由其父类 ShutdownableThread.run() 方法实现
+        //核心逻辑就是在 while 循环中不断执行子类实现的 AbstractFetcherThread.doWork()方法
         fetcherThread.start()
         fetcherThread
       }
@@ -223,13 +234,17 @@ class FailedPartitions {
     failedPartitionsSet.contains(topicPartition)
   }
 
+  /*** Didi-Kafka 灾备 ↓ ***/
   def listAll(): Set[TopicPartition] = {
     failedPartitionsSet.toSet
   }
+  /*** Didi-Kafka 灾备 ↑ ***/
 }
 
 case class BrokerAndFetcherId(broker: BrokerEndPoint, fetcherId: Int)
 
-case class InitialFetchState(leader: BrokerEndPoint, currentLeaderEpoch: Int, initOffset: Long)
+case class InitialFetchState(leader: BrokerEndPoint,   //(灾备方案中为镜像分区的)leader节点
+                             currentLeaderEpoch: Int,  //(灾备方案中为镜像分区的)leaderEpoch
+                             initOffset: Long)         //(灾备方案中为镜像分区的)HW
 
 case class BrokerIdAndFetcherId(brokerId: Int, fetcherId: Int)

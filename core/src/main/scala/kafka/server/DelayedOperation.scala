@@ -216,6 +216,7 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
    * @param watchKeys keys for bookkeeping the operation
    * @return true iff the delayed operations can be completed by the caller
    */
+  /** TODO-ssy 向DelayedOperationPurgatory中添加DelayedJoin延时任务，等待处理完成至rebalanceTimeoutMs超时 */
   def tryCompleteElseWatch(operation: T, watchKeys: Seq[Any]): Boolean = {
     assert(watchKeys.nonEmpty, "The watch key list can't be empty")
 
@@ -231,6 +232,7 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
 
     // At this point the only thread that can attempt this operation is this current thread
     // Hence it is safe to tryComplete() without a lock
+    //这里的 operation 指的就是之前创建的 DelayedJoin 对象，所以直接看其 tryComplete 方法
     var isCompletedByMe = operation.tryComplete()
     if (isCompletedByMe)
       return true

@@ -24,12 +24,19 @@ import org.apache.kafka.common.TopicPartition
 
 object ReplicationUtils extends Logging {
 
+  //TODO-ssy 使用Zookeeper client对象更新保存于zk上的leader和isr信息
   def updateLeaderAndIsr(zkClient: KafkaZkClient, partition: TopicPartition, newLeaderAndIsr: LeaderAndIsr,
                          controllerEpoch: Int): (Boolean, Int) = {
     debug(s"Updated ISR for $partition to ${newLeaderAndIsr.isr.mkString(",")}")
+    //先获取要更新的zookeeper节点路径:
+    //"/brokers/topics/<topic>/partition/<partition>/state"
     val path = TopicPartitionStateZNode.path(partition)
+    //组装新的json串
+    //数据示例：
+    //{”controller_epoch”:26,”leader”:0,”version”:1, ”leader_epoch”:2,”isr”:[0,1]}
     val newLeaderData = TopicPartitionStateZNode.encode(LeaderIsrAndControllerEpoch(newLeaderAndIsr, controllerEpoch))
     // use the epoch of the controller that made the leadership decision, instead of the current controller epoch
+    //执行更新操作，将状态信息写入到 zk 中的持久性节点
     val updatePersistentPath: (Boolean, Int) = zkClient.conditionalUpdatePath(path, newLeaderData,
       newLeaderAndIsr.zkVersion, Some(checkLeaderAndIsrZkData))
     updatePersistentPath

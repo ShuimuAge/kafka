@@ -96,6 +96,7 @@ object DynamicConfig {
   }
 
   object User {
+    // Didi-Kafka 灾备 1
     //DidiHA Properties
     val DidiHAActiveClusterProp = UserConfigManager.DidiHAActiveClusterProp
     //Documentation
@@ -106,12 +107,14 @@ object DynamicConfig {
       .define(Client.ProducerByteRateOverrideProp, LONG, Client.DefaultProducerOverride, MEDIUM, Client.ProducerOverrideDoc)
       .define(Client.ConsumerByteRateOverrideProp, LONG, Client.DefaultConsumerOverride, MEDIUM, Client.ConsumerOverrideDoc)
       .define(Client.RequestPercentageOverrideProp, DOUBLE, Client.DefaultRequestOverride, MEDIUM, Client.RequestOverrideDoc)
+      // Didi-Kafka 灾备 1
       .define(DidiHAActiveClusterProp, STRING, null, MEDIUM, DidiHAActiveClusterProp)
 
     def names = userConfigs.names
 
     def validate(props: Properties) = DynamicConfig.validate(userConfigs, props, customPropsAllowed = false)
 
+    // TODO-ssy Didi-Kafka 灾备 1
     def getConfigs() = userConfigs
   }
 
@@ -127,6 +130,6 @@ object DynamicConfig {
     //ValidateValues
     configDef.parse(propResolved)
   }
-
+  // Didi-Kafka 灾备 1
   def getUserConfigs() = User.getConfigs()
 }

@@ -59,6 +59,9 @@ case class FetchMetadata(fetchMinBytes: Int,
  * A delayed fetch operation that can be created by the replica manager and watched
  * in the fetch operation purgatory
  */
+//Kafka 选择了延时 操作来处理这种情况。 Kafka 在处理拉取请求时，会先读取一次日志文件 ，
+// 如果收集不到足够多(fetchMinBytes，由参数 fetch.min.bytes 配置，默认值为 1)的消息，
+// 那么就会创建一个延时拉取操作( DelayedFetch) 以等待拉取到足够数量的消息
 class DelayedFetch(delayMs: Long,
                    fetchMetadata: FetchMetadata,
                    replicaManager: ReplicaManager,

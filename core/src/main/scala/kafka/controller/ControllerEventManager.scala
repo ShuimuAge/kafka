@@ -40,6 +40,8 @@ trait ControllerEventProcessor {
   def preempt(event: ControllerEvent): Unit
 }
 
+//KafkaController使用单线程基于事件队列的模型，将每个事件都做一层封装
+//主要是记录了下入队时间，并且提供了事件需要调用的方法
 class QueuedEvent(val event: ControllerEvent,
                   val enqueueTimeMs: Long) {
   val processingStarted = new CountDownLatch(1)
@@ -67,6 +69,7 @@ class QueuedEvent(val event: ControllerEvent,
   }
 }
 
+//zk事件管理器
 class ControllerEventManager(controllerId: Int,
                              processor: ControllerEventProcessor,
                              time: Time,
@@ -75,6 +78,13 @@ class ControllerEventManager(controllerId: Int,
 
   @volatile private var _state: ControllerState = ControllerState.Idle
   private val putLock = new ReentrantLock()
+  /**
+   * 事件队列
+   * Kafka的控制器使用单线程基于事件队列的模型，将每个事件都做一层封装，
+   * 然后按照事件发生的先后顺序暂存到LinkedBlockingQueue中，
+   * 最后使用一个专用的线程（ControllerEventThread）按照FIFO的原则顺序处理各个事件，
+   * 这样就可以不需要锁机制就可以在多线程间维护线程安全
+   */
   private val queue = new LinkedBlockingQueue[QueuedEvent]
   // Visible for test
   private[controller] val thread = new ControllerEventThread(ControllerEventThreadName)
@@ -85,6 +95,7 @@ class ControllerEventManager(controllerId: Int,
 
   def state: ControllerState = _state
 
+  //启动eventManager的ControllerEventThread线程来处理event queue中的任务ControllerEvent
   def start(): Unit = thread.start()
 
   def close(): Unit = {

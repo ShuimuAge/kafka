@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 
+/*** Didi-Kafka 灾备 1***/
 public class UserConfigManager {
     public static final String DidiHAActiveClusterProp = "didi.ha.active.cluster";
     private static final Logger log = LoggerFactory.getLogger(UserConfigManager.class);

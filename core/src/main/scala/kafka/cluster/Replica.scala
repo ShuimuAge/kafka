@@ -25,6 +25,8 @@ import org.apache.kafka.common.{TopicPartition}
 class Replica(val brokerId: Int, val topicPartition: TopicPartition) extends Logging {
   // the log end offset value, kept in all replicas;
   // for local replica it is the log's end offset, for remote replicas its value is only updated by follower fetch
+  //对于本地副本，代表该副本本身的LEO
+  //对于leader保存的follower副本，代表该副本的LEO，随着follower的fetch请求更新
   @volatile private[this] var _logEndOffsetMetadata = LogOffsetMetadata.UnknownOffsetMetadata
   // the log start offset value, kept in all replicas;
   // for local replica it is the log's start offset, for remote replicas its value is only updated by follower fetch
@@ -32,6 +34,7 @@ class Replica(val brokerId: Int, val topicPartition: TopicPartition) extends Log
 
   // The log end offset value at the time the leader received the last FetchRequest from this follower
   // This is used to determine the lastCaughtUpTimeMs of the follower
+  //leader最后一次获取follower的FetchRequest时follower的leo值
   @volatile private[this] var lastFetchLeaderLogEndOffset = 0L
 
   // The time when the leader received the last FetchRequest from this follower
@@ -68,18 +71,26 @@ class Replica(val brokerId: Int, val topicPartition: TopicPartition) extends Log
    * fetch request is always smaller than the leader's LEO, which can happen if small produce requests are received at
    * high frequency.
    */
+  //更新Leader副本保存的Follower副本的LEO的值
+  //更新Leader副本保存的Follower副本的的lastCaughtUpTimeMs的值，即上一次同步的时间，在做ISR扩缩时需要用到
   def updateFetchState(followerFetchOffsetMetadata: LogOffsetMetadata,
                        followerStartOffset: Long,
                        followerFetchTimeMs: Long,
                        leaderEndOffset: Long,
                        lastSentHighwatermark: Long): Unit = {
+    //如果读到的offset大于leader处的leo，则更新_lastCaughtUpTimeMs
     if (followerFetchOffsetMetadata.messageOffset >= leaderEndOffset)
       _lastCaughtUpTimeMs = math.max(_lastCaughtUpTimeMs, followerFetchTimeMs)
+    //如果读到的offset比上次拉取的时候leader的leo大，则更新_lastCaughtUpTimeMs为math.max(_lastCaughtUpTimeMs, lastFetchTimeMs)
     else if (followerFetchOffsetMetadata.messageOffset >= lastFetchLeaderLogEndOffset)
       _lastCaughtUpTimeMs = math.max(_lastCaughtUpTimeMs, lastFetchTimeMs)
 
+    //更新logStartOffset和logEndOffset
+    // (logStartOffset是由follower请求的时候带过来的，
+    //  logEndOffset是这次拉取到的最大的offset）
     _logStartOffset = followerStartOffset
     _logEndOffsetMetadata = followerFetchOffsetMetadata
+    //leader最后一次获取follower的FetchRequest时follower的leo值
     lastFetchLeaderLogEndOffset = leaderEndOffset
     lastFetchTimeMs = followerFetchTimeMs
     updateLastSentHighWatermark(lastSentHighwatermark)

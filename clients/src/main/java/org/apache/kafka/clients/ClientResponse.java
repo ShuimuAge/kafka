@@ -105,7 +105,9 @@ public class ClientResponse {
     }
 
     public void onComplete() {
+        //如果绑定了回调函数
         if (callback != null)
+            //调用回调函数的onComplete方法对响应进行处理
             callback.onComplete(this);
     }
 

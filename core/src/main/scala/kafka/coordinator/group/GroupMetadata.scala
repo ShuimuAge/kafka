@@ -49,7 +49,10 @@ private[group] sealed trait GroupState {
  *             all members have left the group => Empty
  *             group is removed by partition emigration => Dead
  */
+//消费者组准备开启重平衡，此时所有成员都要重新请求加入消费者组
 private[group] case object PreparingRebalance extends GroupState {
+  //看当前的组状态是否为 PreparingRebalance 的前置状态，
+  // 满足条件的有三种：Stable, CompletingRebalance, Empty
   val validPreviousStates: Set[GroupState] = Set(Stable, CompletingRebalance, Empty)
 }
 
@@ -66,6 +69,8 @@ private[group] case object PreparingRebalance extends GroupState {
  *             member failure detected => PreparingRebalance
  *             group is removed by partition emigration => Dead
  */
+//消费者组下所有成员已经加入，各个成员正在等待分配方案。
+// 该状态在老一点的版本中称为 AwaitingSync，它和 CompletingRebalance 是等价的。
 private[group] case object CompletingRebalance extends GroupState {
   val validPreviousStates: Set[GroupState] = Set(PreparingRebalance)
 }
@@ -84,6 +89,7 @@ private[group] case object CompletingRebalance extends GroupState {
  *             follower join-group with new metadata => PreparingRebalance
  *             group is removed by partition emigration => Dead
  */
+//消费组的稳定状态。该状态表明重平衡已经完成，组内各成员能够正常消费数据了。
 private[group] case object Stable extends GroupState {
   val validPreviousStates: Set[GroupState] = Set(CompletingRebalance)
 }
@@ -99,6 +105,8 @@ private[group] case object Stable extends GroupState {
  *         allow offset fetch requests
  * transition: Dead is a final state before group metadata is cleaned up, so there are no transitions
  */
+//同样是组内没有任何成员，但组的元数据信息已经在协调者端被移除。
+// 协调者组件保存着向它注册过的所有组信息，所谓的元数据信息就类似这个注册信息。
 private[group] case object Dead extends GroupState {
   val validPreviousStates: Set[GroupState] = Set(Stable, PreparingRebalance, CompletingRebalance, Empty, Dead)
 }
@@ -118,6 +126,7 @@ private[group] case object Dead extends GroupState {
   *             group is removed by partition emigration => Dead
   *             group is removed by expiration => Dead
   */
+//初始态，组内没有任何成员，但消费者组可能存在已提交的位移数据，而且这些位移数据尚未过期。
 private[group] case object Empty extends GroupState {
   val validPreviousStates: Set[GroupState] = Set(PreparingRebalance)
 }
@@ -193,27 +202,54 @@ case class CommitRecordMetadataAndOffset(appendedBatchOffset: Option[Long], offs
  *  3. leader id
  */
 @nonthreadsafe
-private[group] class GroupMetadata(val groupId: String, initialState: GroupState, time: Time) extends Logging {
+//group 的 Metadata 信息,对 group 级别而言,每个 group 都会有一个实例对象
+private[group] class GroupMetadata(val groupId: String,       //消费组名
+                                   initialState: GroupState,  //消费者组初始状态
+                                   time: Time) extends Logging {
   type JoinCallback = JoinGroupResult => Unit
 
   private[group] val lock = new ReentrantLock
 
+  // Didi-Kafka 灾备 1
+  //集群元数据中保存的镜像集群
   var remoteCluster: Option [String] = None
 
+  // group 的当前状态
+  // 当前有 5 个状态:
+  // 1. Empty 表示当前无成员的消费者组；
+  // 2. PreparingRebalance 表示正在执行加入组操作的消费者组；
+  // 3. CompletingRebalance 表示等待 Leader 成员制定分配方案的消费者组；
+  // 4. Stable 表示已完成 Rebalance 操作可正常工作的消费者组；
+  // 5. Dead 表示当前无成员且元数据信息被删除的消费者组
   private var state: GroupState = initialState
+  //上一次组状态转换的发生时间
+  // 用于确定位移主题中的过期消息：位移主题中的消息也要遵循 Kafka 的留存策略，
+  // 所有当前时间与该字段的差值超过了留存阈值的消息都被视为“已过期”（Expired）
   var currentStateTimestamp: Option[Long] = Some(time.milliseconds())
   var protocolType: Option[String] = None
+  //消费组选举出来的消费策略
   var protocolName: Option[String] = None
+  // 消费组 Generation id。Generation id等同于消费者组执行过 Rebalance 操作的次数：
+  // 每次执行 Rebalance 时，Generation 数都要加 1。
   var generationId = 0
+  // leader consumer id ，记录消费者组的Leader成员的memberId，可能不存在(在 Rebalance 早期阶段，这个 Leader 可能尚未被选举出来)
+  //当消费者组执行 Rebalance 过程时，需要选举一个成员作为 Leader，负责为所有成员制定分区分配方案。
   private var leaderId: Option[String] = None
 
+  // consumerGroup 的 member（consumer）的元数据 集合
   private val members = new mutable.HashMap[String, MemberMetadata]
   // Static membership mapping [key: group.instance.id, value: member.id]
+  //consumerGroup的静态member Id集合
   private val staticMembers = new mutable.HashMap[String, String]
+  //待决成员列表：在没有memberId且不是静态成员的时候第一次加入组请求会被记录在这个list里面
   private val pendingMembers = new mutable.HashSet[String]
+  //申请并等待加入消费组的成员数
   private var numMembersAwaitingJoin = 0
+  // 分区分配策略支持票数
   private val supportedProtocols = new mutable.HashMap[String, Integer]().withDefaultValue(0)
+  // 保存消费者组订阅分区的 commit offset
   private val offsets = new mutable.HashMap[TopicPartition, CommitRecordMetadataAndOffset]
+  // commit offset 成功后更新到该 map 中
   private val pendingOffsetCommits = new mutable.HashMap[TopicPartition, OffsetAndMetadata]
   private val pendingTransactionalOffsetCommits = new mutable.HashMap[Long, mutable.Map[TopicPartition, CommitRecordMetadataAndOffset]]()
   private var receivedTransactionalOffsetCommits = false
@@ -221,16 +257,23 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
 
   // When protocolType == `consumer`, a set of subscribed topics is maintained. The set is
   // computed when a new generation is created or when the group is restored from the log.
+  // 消费者组订阅的主题列表
   private var subscribedTopics: Option[Set[String]] = None
 
+  //这个变量的作用，是 Kafka 为消费者组 Rebalance 流程做的一个性能优化。
+  // 大致的思想是在消费者组首次进行 Rebalance 时，让 Coordinator 多等待一段时间，
+  // 从而让更多的消费者组成员加入到组中，以免后来者申请入组而反复进行 Rebalance。
+  // 这段多等待的时间，由服务端参数 group.initial.rebalance.delay.ms 设置。
   var newMemberAdded: Boolean = false
 
   def inLock[T](fun: => T): T = CoreUtils.inLock(lock)(fun)
 
+  //判断groupState
   def is(groupState: GroupState) = state == groupState
   def not(groupState: GroupState) = state != groupState
   def has(memberId: String) = members.contains(memberId)
   def get(memberId: String) = members(memberId)
+  //消费组的成员数
   def size = members.size
 
   def isLeader(memberId: String): Boolean = leaderId.contains(memberId)
@@ -239,16 +282,20 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
 
   def isConsumerGroup: Boolean = protocolType.contains(ConsumerProtocol.PROTOCOL_TYPE)
 
+  //将成员信息添加到group的元数据对象members中，如果还没有选出Leader成员，则设置当前成员为Leader
   def add(member: MemberMetadata, callback: JoinCallback = null): Unit = {
     if (members.isEmpty)
       this.protocolType = Some(member.protocolType)
 
+    //进行groupId、协议校验
     assert(groupId == member.groupId)
     assert(this.protocolType.orNull == member.protocolType)
     assert(supportsProtocols(member.protocolType, MemberMetadata.plainProtocolSet(member.supportedProtocols)))
 
     if (leaderId.isEmpty)
+      //如果还没有选出Leader成员，则设置当前成员为Leader
       leaderId = Some(member.memberId)
+    //将成员信息添加到group的元数据对象members中
     members.put(member.memberId, member)
     member.supportedProtocols.foreach{ case (protocol, _) => supportedProtocols(protocol) += 1 }
     member.awaitingJoinCallback = callback
@@ -256,6 +303,7 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
       numMembersAwaitingJoin += 1
   }
 
+  //将消费者从组中移除，如果该消费者是leader，则重新选举一个leader
   def remove(memberId: String): Unit = {
     members.remove(memberId).foreach { member =>
       member.supportedProtocols.foreach{ case (protocol, _) => supportedProtocols(protocol) -= 1 }
@@ -263,8 +311,12 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
         numMembersAwaitingJoin -= 1
     }
 
-    if (isLeader(memberId))
+    //如果某一时刻leader消费者推出了消费组
+    if (isLeader(memberId)) {
+      //重新选举一个新的leader
+      //选member中第一个键值对的consumer作为leader，这种选举方式近乎随机
       leaderId = members.keys.headOption
+    }
   }
 
   /**
@@ -327,6 +379,7 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
 
   def isPendingMember(memberId: String): Boolean = pendingMembers.contains(memberId) && !has(memberId)
 
+  //将member加入到待决成员列表
   def addPendingMember(memberId: String) = pendingMembers.add(memberId)
 
   def removePendingMember(memberId: String) = pendingMembers.remove(memberId)
@@ -355,8 +408,12 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
 
   def currentState = state
 
+  //还未Join成功的成员
   def notYetRejoinedMembers = members.values.filter(!_.isAwaitingJoin).toList
 
+  //判断组中是否创建了所有成员的元数据对象，条件有两个：
+  //1.组中成员元数据对象数 = 申请加入组的成员数
+  //2.待决成员列表为空
   def hasAllMembersJoined = members.size == numMembersAwaitingJoin && pendingMembers.isEmpty
 
   def allMembers = members.keySet
@@ -371,6 +428,8 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
     timeout.max(member.rebalanceTimeoutMs)
   }
 
+  //为consumer创建memberId：优先使用groupInstanceId，没有则用clientId
+  //第一次加入消费组的consumer: String memberId = clientId + "-" + UUID.randomUUID().toString
   def generateMemberId(clientId: String,
                        groupInstanceId: Option[String]): String = {
     groupInstanceId match {
@@ -401,26 +460,32 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
 
   def canRebalance = PreparingRebalance.validPreviousStates.contains(state)
 
+  //将组状态转换为xxx
   def transitionTo(groupState: GroupState): Unit = {
     assertValidTransition(groupState)
     state = groupState
     currentStateTimestamp = Some(time.milliseconds())
   }
 
+  //选举消费组分配策略
   def selectProtocol: String = {
+    // 如果没有任何成员，自然无法确定选用哪个策略
     if (members.isEmpty)
       throw new IllegalStateException("Cannot select protocol for empty group")
 
     // select the protocol for this group which is supported by all members
+    //收集每个消费者支持的所有分配策略，组成候选集
     val candidates = candidateProtocols
 
     // let each member vote for one of the protocols and choose the one with the most votes
+    // 让每个成员投票，票数最多的那个策略当选
     val votes: List[(String, Int)] = allMemberMetadata
       .map(_.vote(candidates))
       .groupBy(identity)
       .mapValues(_.size)
       .toList
 
+    // 成员支持列表中的策略是有顺序的。这就是说，[“策略 B”，“策略 A”]和[“策略 A”，“策略 B”]是不同的，成员会倾向于选择靠前的策略。
     votes.maxBy(_._2)._1
   }
 
@@ -485,6 +550,7 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
     }
   }
 
+  //根据新加入成员的元数据信息，更新消费者组元数据
   def updateMember(member: MemberMetadata,
                    protocols: List[(String, Array[Byte])],
                    callback: JoinCallback) = {
@@ -512,6 +578,7 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
   /**
     * @return true if a sync callback actually performs.
     */
+  //调用回调函数，，调用完成后将其回调函数清除
   def maybeInvokeSyncCallback(member: MemberMetadata,
                               syncGroupResult: SyncGroupResult): Boolean = {
     if (member.isAwaitingSync) {
@@ -523,11 +590,14 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
     }
   }
 
+  //TODO-ssy 选举分区分配策略，更新group的generationId，切换组状态
   def initNextGeneration() = {
     if (members.nonEmpty) {
+      //生成新的generationId
       generationId += 1
       protocolName = Some(selectProtocol)
       subscribedTopics = computeSubscribedTopics()
+      //转换group状态到CompletingRebalance
       transitionTo(CompletingRebalance)
     } else {
       generationId += 1

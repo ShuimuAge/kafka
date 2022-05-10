@@ -59,21 +59,21 @@ import static org.apache.kafka.common.record.RecordBatch.NO_PARTITION_LEADER_EPO
  */
 public class Metadata implements Closeable {
     private final Logger log;
-    private final long refreshBackoffMs;
-    private final long metadataExpireMs;
-    private int updateVersion;  // bumped on every metadata response
-    private int requestVersion; // bumped on every new topic addition
-    private long lastRefreshMs;
-    private long lastSuccessfulRefreshMs;
+    private final long refreshBackoffMs;    // retry.backoff.ms: 默认值为100ms，它用来设定两次重试之间的时间间隔，避免无效的频繁重试。
+    private final long metadataExpireMs;    // metadata.max.age.ms: 默认值为300000，如果在这个时间内元数据没有更新的话会被强制更新。
+    private int updateVersion;              // bumped on every metadata response，更新版本号，每更新成功1次，version自增1,主要是用于判断metadata是否更新
+    private int requestVersion;             // bumped on every new topic addition，请求版本号，每发送一次请求，version自增1
+    private long lastRefreshMs;             // 上一次更新的时间（包含更新失败）
+    private long lastSuccessfulRefreshMs;   // 上一次更新成功的时间
     private KafkaException fatalException;
-    private Set<String> invalidTopics;
-    private Set<String> unauthorizedTopics;
-    private MetadataCache cache = MetadataCache.empty();
+    private Set<String> invalidTopics;      // 非法的topics
+    private Set<String> unauthorizedTopics; // 未认证的topics
+    private MetadataCache cache = MetadataCache.empty(); // 元数据信息的Cache缓存
     private boolean needFullUpdate;
-    private boolean needPartialUpdate;
-    private final ClusterResourceListeners clusterResourceListeners;
+    private boolean needPartialUpdate;      //是否需要强制更新
+    private final ClusterResourceListeners clusterResourceListeners;    // 会收到metadata updates的Listener列表
     private boolean isClosed;
-    private final Map<TopicPartition, Integer> lastSeenLeaderEpochs;
+    private final Map<TopicPartition, Integer> lastSeenLeaderEpochs;    // 存储各Partition最近一次的leaderEpoch
 
     /**
      * Create a new Metadata instance
@@ -129,6 +129,7 @@ public class Metadata implements Closeable {
      * @param nowMs current time in ms
      * @return remaining time in ms till updating the cluster info
      */
+    /** 集群元数据 metadata 下次更新的时间（需要判断是强制更新还是 metadata 过期更新,前者是立马更新,后者是计算 metadata 的过期时间）*/
     public synchronized long timeToNextUpdate(long nowMs) {
         long timeToExpire = updateRequested() ? 0 : Math.max(this.lastSuccessfulRefreshMs + this.metadataExpireMs - nowMs, 0);
         return Math.max(timeToExpire, timeToAllowUpdate(nowMs));
@@ -141,16 +142,23 @@ public class Metadata implements Closeable {
     /**
      * Request an update of the current cluster metadata info, return the current updateVersion before the update
      */
+    //申请对当前集群元数据的更新，返回更新前的updateVersion
     public synchronized int requestUpdate() {
+        // 将更新字段needUpdate设置true，表示需要强制更新
         this.needFullUpdate = true;
+        // 返回更新前版本值
         return this.updateVersion;
     }
 
+    //申请新Topic加入时的更新
     public synchronized int requestUpdateForNewTopics() {
         // Override the timestamp of last refresh to let immediate update.
+        // 将最近一次刷新时间置为0
         this.lastRefreshMs = 0;
+        // 将更新字段needUpdate设置true，表示需要强制更新
         this.needPartialUpdate = true;
         this.requestVersion++;
+        // 返回更新后版本值
         return this.updateVersion;
     }
 
@@ -197,6 +205,7 @@ public class Metadata implements Closeable {
      *
      * @return true if an update was requested, false otherwise
      */
+    //是否需要即刻进行元数据更新
     public synchronized boolean updateRequested() {
         return this.needFullUpdate || this.needPartialUpdate;
     }
@@ -250,6 +259,7 @@ public class Metadata implements Closeable {
      * @param isPartialUpdate whether the metadata request was for a subset of the active topics
      * @param nowMs current time in milliseconds
      */
+    // 更新 meta 信息
     public synchronized void update(int requestVersion, MetadataResponse response, boolean isPartialUpdate, long nowMs) {
         Objects.requireNonNull(response, "Metadata response cannot be null");
         if (isClosed())

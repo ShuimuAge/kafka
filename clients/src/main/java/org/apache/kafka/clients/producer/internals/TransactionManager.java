@@ -1104,6 +1104,7 @@ public class TransactionManager {
         pendingRequests.add(requestHandler);
     }
 
+    //选择具有最少请求的节点Node，即具有最少的InFlightRequests的节点
     private void lookupCoordinator(FindCoordinatorRequest.CoordinatorType type, String coordinatorKey) {
         switch (type) {
             case GROUP:

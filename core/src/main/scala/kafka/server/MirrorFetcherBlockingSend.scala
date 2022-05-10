@@ -14,8 +14,10 @@ import java.net.SocketTimeoutException
 import scala.collection.JavaConverters._
 
 /**
+ * Didi-Kafka 灾备
  * @author leewei
  * @date 2021/9/28
+ * 远程集群连接(支持每个集群独立认证)
  */
 class MirrorFetcherBlockingSend(sourceBroker: BrokerEndPoint,
                                 config: HAClusterConfig,

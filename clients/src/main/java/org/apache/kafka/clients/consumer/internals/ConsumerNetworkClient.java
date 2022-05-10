@@ -118,6 +118,8 @@ public class ConsumerNetworkClient implements Closeable {
      *                         for any reason.
      * @return A future which indicates the result of the send.
      */
+    //该send()方法不会直接发送请求，而是会将请求直接放在unset队列中，同时会返回一个RequestFuture类，
+    // 这个类用于异步回调，通过添加监听器异步处理返回的结果
     public RequestFuture<ClientResponse> send(Node node,
                                               AbstractRequest.Builder<?> requestBuilder,
                                               int requestTimeoutMs) {
@@ -125,10 +127,12 @@ public class ConsumerNetworkClient implements Closeable {
         RequestFutureCompletionHandler completionHandler = new RequestFutureCompletionHandler();
         ClientRequest clientRequest = client.newClientRequest(node.idString(), requestBuilder, now, true,
                 requestTimeoutMs, completionHandler);
+        // 放到unset队列，并不直接发送请求
         unsent.put(node, clientRequest);
 
         // wakeup the client in case it is blocking in poll so that we can send the queued request
         client.wakeup();
+        // 返回RequestFuture，可在该类中添加监听器处理返回的结果
         return completionHandler.future;
     }
 
@@ -241,14 +245,19 @@ public class ConsumerNetworkClient implements Closeable {
      */
     public void poll(Timer timer, PollCondition pollCondition, boolean disableWakeup) {
         // there may be handlers which need to be invoked if we woke up the previous call to poll
+        // 通知pendingCompletion队列中的请求，并执行请求的回调pendingCompletion.fireCompletion()
         firePendingCompletedRequests();
 
         lock.lock();
         try {
             // Handle async disconnects prior to attempting any sends
+            // 处理异步断开的请求，获取pendingDisconnects中异步断开的Node节点，
+            // 移除unset队列中对应Node节点的所有请求，并执行对应请求的回调
             handlePendingDisconnects();
 
             // send all the requests we can send now
+            // 对unset队列中的所有请求，调用NetworkClient.send()方法，
+            // 该方法将请求保存到KafkaChannel的send字段中等待发送
             long pollDelayMs = trySend(timer.currentTimeMs());
 
             // check whether the poll is still needed by the caller. Note that if the expected completion
@@ -259,15 +268,19 @@ public class ConsumerNetworkClient implements Closeable {
                 long pollTimeout = Math.min(timer.remainingMs(), pollDelayMs);
                 if (client.inFlightRequestCount() == 0)
                     pollTimeout = Math.min(pollTimeout, retryBackoffMs);
+                // 延时发送，将KafkaChannel的send请求发送出去
                 client.poll(pollTimeout, timer.currentTimeMs());
             } else {
+                // 立刻发送，将KafkaChannel的send请求发送出去
                 client.poll(0, timer.currentTimeMs());
             }
+            // 更新时间
             timer.update();
 
             // handle any disconnects by failing the active requests. note that disconnects must
             // be checked immediately following poll since any subsequent call to client.ready()
             // will reset the disconnect status
+            // 处理连接失败的Node节点，移除unset队列中连接失败节点的所有请求，并执行对应unset队列中的所有请求的回调
             checkDisconnects(timer.currentTimeMs());
             if (!disableWakeup) {
                 // trigger wakeups after checking for disconnects so that the callbacks will be ready
@@ -279,9 +292,11 @@ public class ConsumerNetworkClient implements Closeable {
 
             // try again to send requests since buffer space may have been
             // cleared or a connect finished in the poll
+            // 处理完连接失败的节点请求，再次尝试等待发送
             trySend(timer.currentTimeMs());
 
             // fail requests that couldn't be sent if they have expired
+            // 移除unset队列中过期的请求，并执行请求的回调
             failExpiredRequests(timer.currentTimeMs());
 
             // clean unsent requests collection to keep the map from growing indefinitely
@@ -291,6 +306,7 @@ public class ConsumerNetworkClient implements Closeable {
         }
 
         // called without the lock to avoid deadlock potential if handlers need to acquire locks
+        // 再次通知pendingCompletion执行回调
         firePendingCompletedRequests();
 
         metadata.maybeThrowAnyException();

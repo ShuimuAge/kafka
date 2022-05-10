@@ -25,6 +25,7 @@ import java.util.Optional;
 /**
  * Class to extract group rebalance related configs.
  */
+//rebalance配置
 public class GroupRebalanceConfig {
 
     public enum ProtocolType {
@@ -40,7 +41,7 @@ public class GroupRebalanceConfig {
     public final int sessionTimeoutMs;
     public final int rebalanceTimeoutMs;
     public final int heartbeatIntervalMs;
-    public final String groupId;
+    public final String groupId;                       //设置的消费组
     public final Optional<String> groupInstanceId;
     public final long retryBackoffMs;
     public final boolean leaveGroupOnClose;

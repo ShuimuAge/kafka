@@ -55,6 +55,7 @@ public interface MetadataUpdater extends Closeable {
      * The semantics of `needed` and `possible` are implementation-dependent and may take into account a number of
      * factors like node availability, how long since the last metadata update, etc.
      */
+    // 判断是否需要更新 meta,如果需要就先与 Broker 建立连接，然后发送更新 metadata 的请求；（请求更新 metadata 的地方）
     long maybeUpdate(long now);
 
     /**

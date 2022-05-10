@@ -242,6 +242,7 @@ class MetadataCache(brokerId: Int) extends Logging {
 
   def getClusterMetadata(clusterId: String, listenerName: ListenerName): Cluster = {
     val snapshot = metadataSnapshot
+    //这个参数是一个Map类型，用来映射kafka集群中节点编号和节点的关系
     val nodes = snapshot.aliveNodes.map { case (id, nodes) => (id, nodes.get(listenerName).orNull) }
     def node(id: Integer): Node = nodes.get(id.toLong).orNull
     val partitions = getAllPartitions(snapshot)
@@ -252,7 +253,9 @@ class MetadataCache(brokerId: Int) extends Logging {
           state.isr.asScala.map(node).toArray,
           state.offlineReplicas.asScala.map(node).toArray)
       }
+    //这个参数是一个Set类型，用来存储未授权的Topic集合
     val unauthorizedTopics = Collections.emptySet[String]
+    //用来存储kafka内部的Topic集合，例如__consumer_offsets
     val internalTopics = getAllTopics(snapshot).filter(Topic.isInternal).asJava
     new Cluster(clusterId, nodes.values.filter(_ != null).toBuffer.asJava,
       partitions.toBuffer.asJava,

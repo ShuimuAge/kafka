@@ -146,9 +146,15 @@ class ReplicaFetcherThread(name: String,
   }
 
   // process fetched data
-  override def processPartitionData(topicPartition: TopicPartition,
-                                    fetchOffset: Long,
-                                    partitionData: FetchData): Option[LogAppendInfo] = {
+  // 用于处理指定分区从Leader副本所在节点返回的响应，
+  // 将获取的消息写入本地存储，并返回写入消息的元数据
+  //这里有两个个重要的操作：
+  //1. 写入消息，更新 Follower 副本的 LEO(对应同步数据的第八步)
+  //2. 更新 Follower 副本本地的 HW 值(对应同步数据的第九步)
+  override def processPartitionData(topicPartition: TopicPartition,              // 读取哪个分区的数据
+                                    fetchOffset: Long,                           // 读取到的最新位移值
+                                    partitionData: FetchData                     // 读取到的分区消息数据
+                                   ): Option[LogAppendInfo] = {
     val partition = replicaMgr.nonOfflinePartition(topicPartition).get
     val log = partition.localLogOrException
     val records = toMemoryRecords(partitionData.records)
@@ -164,6 +170,10 @@ class ReplicaFetcherThread(name: String,
         .format(log.logEndOffset, topicPartition, records.sizeInBytes, partitionData.highWatermark))
 
     // Append the leader's messages to the log
+    //调用 Partition.appendRecordsToFollowerOrFutureReplica()
+    // 方法将消息数据追加到本地，这部分主要是日志文件的写操作，
+    // 如有兴趣可参考Kafka 服务端对客户端的 Produce 请求处理，
+    // 至此就完成了主从副本消息数据的同步
     val logAppendInfo = partition.appendRecordsToFollowerOrFutureReplica(records, isFuture = false)
 
     if (isTraceEnabled)
@@ -173,6 +183,9 @@ class ReplicaFetcherThread(name: String,
 
     // For the follower replica, we do not need to keep its segment base offset and physical position.
     // These values will be computed upon becoming leader or handling a preferred read replica fetch.
+    // 消息写入完成后，需要把 Fetch 响应中的 HW 取出来，尝试更新本地日志的 HW，
+    // 这部分调用 Log.updateHighWatermark() 方法实现
+    //TODO-ssy 根据从leader读取到的LEO更新Follower的HW
     val followerHighWatermark = log.updateHighWatermark(partitionData.highWatermark)
     log.maybeIncrementLogStartOffset(leaderLogStartOffset)
     if (isTraceEnabled)
@@ -203,6 +216,7 @@ class ReplicaFetcherThread(name: String,
 
   override protected def fetchFromLeader(fetchRequest: FetchRequest.Builder): Map[TopicPartition, FetchData] = {
     try {
+      //给Leader发送FETCH请求，获取响应数据
       val clientResponse = leaderEndpoint.sendRequest(fetchRequest)
       val fetchResponse = clientResponse.responseBody.asInstanceOf[FetchResponse[Records]]
       if (!fetchSessionHandler.handleResponse(fetchResponse)) {
@@ -246,15 +260,24 @@ class ReplicaFetcherThread(name: String,
     }
   }
 
+  //封装 Fetch 请求
+  //为指定分区集合构建对应的FetchRequest.Builder 对象，而该对象是构建 FetchRequest 的核心组件
+  //这个方法中有一个重要的操作：
+  //封装拉取请求时，携带了Follower副本的 LogStartOffset 和 LEO 值(对应同步数据的第三步)
   override def buildFetch(partitionMap: Map[TopicPartition, PartitionFetchState]): ResultWithPartitions[Option[ReplicaFetch]] = {
     val partitionsWithError = mutable.Set[TopicPartition]()
 
+    //核心是一个LinkedHashMap[TopicPartition, FetchRequest.PartitionData]
     val builder = fetchSessionHandler.newBuilder(partitionMap.size, false)
+    //遍历提出Fetch请求的副本
     partitionMap.foreach { case (topicPartition, fetchState) =>
       // We will not include a replica in the fetch request if it should be throttled.
+      //如果分区的状态是可拉取的，且该分区未对follower限流
       if (fetchState.isReadyForFetch && !shouldFollowerThrottle(quota, fetchState, topicPartition)) {
         try {
+          //获取本地Follower副本保存的分区日志的logStartOffset
           val logStartOffset = this.logStartOffset(topicPartition)
+          //用Follower副本的 LEO 值(fetchState.fetchOffset) 和 LogStartOffset 等信息封装拉取请求
           builder.add(topicPartition, new FetchRequest.PartitionData(
             fetchState.fetchOffset, logStartOffset, fetchSize, Optional.of(fetchState.currentLeaderEpoch)))
         } catch {
@@ -266,10 +289,18 @@ class ReplicaFetcherThread(name: String,
       }
     }
 
+    //fetchData是一个FetchSessionHandler.FetchRequestData
+    //主要包括：
+    //1. 待传送的发起Fetch请求的副本：          toSend: Map[TopicPartition, FetchRequest.PartitionData]
+    //2. 在fetch request session中的所有副本： sessionPartitions: Map[TopicPartition, FetchRequest.PartitionData]
     val fetchData = builder.build()
     val fetchRequestOpt = if (fetchData.sessionPartitions.isEmpty && fetchData.toForget.isEmpty) {
       None
     } else {
+      //正常情况下，封装Fetch请求，包括：
+      //1. 本brokerId，等到Leader副本所在的broker上会作为本broker上所有副本的partitionId
+      //2. minBytes
+      //3. 待同步的副本（LinkedHashMap[TopicPartition, FetchRequest.PartitionData]）
       val requestBuilder = FetchRequest.Builder
         .forReplica(fetchRequestVersion, replicaId, maxWait, minBytes, fetchData.toSend)
         .setMaxBytes(maxBytes)
@@ -285,6 +316,10 @@ class ReplicaFetcherThread(name: String,
    * Truncate the log for each partition's epoch based on leader's returned epoch and offset.
    * The logic for finding the truncation offset is implemented in AbstractFetcherThread.getOffsetTruncationState
    */
+  //进行日志截断
+  //用于将指定分区的日志截断到指定的偏移量
+  //这个方法内部依次调用了：
+  // Partition.truncateTo -> LogManager.truncateTo -> Log.truncateTo -> LogSegment.truncateTo 进行日志截断操作
   override def truncate(tp: TopicPartition, offsetTruncationState: OffsetTruncationState): Unit = {
     val partition = replicaMgr.nonOfflinePartition(tp).get
     val log = partition.localLogOrException

@@ -82,29 +82,42 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
     brokerMetadatas.sortBy(_.id)
   }
 
+  /**
+   * 向zookeeper中写入topic的元数据信息：
+   * 1. 创建 "/config/topics/<topic>" 节点，写入config信息
+   * 2. 创建 "/brokers/topics/<topic>" 节点，写入topic的分区副本分配方案
+   */
   def createTopicWithAssignment(topic: String,
                                 config: Properties,
                                 partitionReplicaAssignment: Map[Int, Seq[Int]]): Unit = {
+    //检查topic创建是否有效
+    // 比如topic名称是否合法，是否已经存在或者是否副本分配信息有误等等
     validateTopicCreate(topic, partitionReplicaAssignment, config)
 
     info(s"Creating topic $topic with configuration $config and initial partition " +
       s"assignment $partitionReplicaAssignment")
 
+    /** 下面两步会向zookeeper中写入topic的元数据信息 */
     // write out the config if there is any, this isn't transactional with the partition assignments
+    /** 1. 创建 "/config/topics/<topic>" 节点，写入config信息 */
     zkClient.setOrCreateEntityConfigs(ConfigType.Topic, topic, config)
 
     // create the partition assignment
+    /** 2. 创建 "/brokers/topics/<topic>" 节点，写入topic的分区副本分配方案 */
     writeTopicPartitionAssignment(topic, partitionReplicaAssignment.mapValues(ReplicaAssignment(_)).toMap, isUpdate = false)
   }
 
   /**
    * Validate topic creation parameters
    */
+  //检查topic创建是否有效
+  // 比如topic名称是否合法，是否已经存在或者是否副本分配信息有误等等
   def validateTopicCreate(topic: String,
                           partitionReplicaAssignment: Map[Int, Seq[Int]],
                           config: Properties): Unit = {
     Topic.validate(topic)
 
+    //若zk中已存在该Topic，报异常
     if (zkClient.topicExists(topic))
       throw new TopicExistsException(s"Topic '$topic' already exists.")
     else if (Topic.hasCollisionChars(topic)) {
@@ -136,13 +149,17 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
     LogConfig.validate(config)
   }
 
+  /** 创建或更新"/brokers/topics/<topic>"节点，写入topic的分区副本分配方案 */
   private def writeTopicPartitionAssignment(topic: String, replicaAssignment: Map[Int, ReplicaAssignment], isUpdate: Boolean): Unit = {
     try {
+      // TopicPartition -> replicaIds(brokerIds) 映射
       val assignment = replicaAssignment.map { case (partitionId, replicas) => (new TopicPartition(topic,partitionId), replicas) }.toMap
 
       if (!isUpdate) {
+        /** 创建"/brokers/topics/<topic>"节点并写入topic的分区副本分配方案 */
         zkClient.createTopicAssignment(topic, assignment.mapValues(_.replicas).toMap)
       } else {
+        /** 向"/brokers/topics/<topic>"节点更新topic的分区副本分配方案 */
         zkClient.setTopicAssignment(topic, assignment)
       }
       debug("Updated path %s with %s for replica assignment".format(TopicZNode.path(topic), assignment))
@@ -181,11 +198,13 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
   * @param validateOnly If true, validate the parameters without actually adding the partitions
   * @return the updated replica assignment
   */
-  def addPartitions(topic: String,
-                    existingAssignment: Map[Int, ReplicaAssignment],
+  //为原有Topic增加partition数量
+  //返回更新后的该Topic上 分区 -> 分区副本分配情况 映射
+  def addPartitions(topic: String,                                        //目标Topic
+                    existingAssignment: Map[Int, ReplicaAssignment],      //已存在的分区 -> 分区副本分配情况
                     allBrokers: Seq[BrokerMetadata],
-                    numPartitions: Int = 1,
-                    replicaAssignment: Option[Map[Int, Seq[Int]]] = None,
+                    numPartitions: Int = 1,                               //准备增加多少新partition
+                    replicaAssignment: Option[Map[Int, Seq[Int]]] = None, //新partition -> 该partition的副本分配 映射
                     validateOnly: Boolean = false): Map[Int, Seq[Int]] = {
     val existingAssignmentPartition0 = existingAssignment.getOrElse(0,
       throw new AdminOperationException(
@@ -279,6 +298,7 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
       case ConfigType.Client => changeClientIdConfig(entityName, configs)
       case ConfigType.User => changeUserOrUserClientIdConfig(entityName, configs)
       case ConfigType.Broker => changeBrokerConfig(parseBroker(entityName), configs)
+      //Didi-Kafka 灾备 1
       case ConfigType.HACluster => changeClusterConfig(entityName, configs)
       case _ => throw new IllegalArgumentException(s"$entityType is not a known entityType. Should be one of ${ConfigType.Topic}, ${ConfigType.Client}, ${ConfigType.Broker}")
     }
@@ -378,6 +398,7 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
     DynamicConfig.Broker.validate(configs)
   }
 
+  /*** Didi-Kafka 灾备 ↓ ***/
   /**
    * Update the config for an existing cluster and create a change notification
    *
@@ -413,6 +434,7 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
         throw new IllegalArgumentException(s"error : User ${user} still contains configs about Cluster ${cluster}")
     }
   }
+  /*** Didi-Kafka 灾备 ↑ ***/
 
   private def changeEntityConfig(rootEntityType: String, fullSanitizedEntityName: String, configs: Properties): Unit = {
     val sanitizedEntityPath = rootEntityType + '/' + fullSanitizedEntityName
@@ -441,6 +463,7 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
     zkClient.getAllTopicsInCluster.map(topic => (topic, fetchEntityConfig(ConfigType.Topic, topic))).toMap
 
   /**
+   * Didi-Kafka 灾备 1 配置管理
    * Gets all user configs
    * @return
    */

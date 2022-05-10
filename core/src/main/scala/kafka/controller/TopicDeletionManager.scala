@@ -96,6 +96,7 @@ class TopicDeletionManager(config: KafkaConfig,
     info(s"Initializing manager with initial deletions: $initialTopicsToBeDeleted, " +
       s"initial ineligible deletions: $initialTopicsIneligibleForDeletion")
 
+    //如果isDeleteTopicEnabled则在zk中直接删除topicsToBeDeleted
     if (isDeleteTopicEnabled) {
       controllerContext.queueTopicDeletion(initialTopicsToBeDeleted)
       controllerContext.topicsIneligibleForDeletion ++= initialTopicsIneligibleForDeletion & controllerContext.topicsToBeDeleted

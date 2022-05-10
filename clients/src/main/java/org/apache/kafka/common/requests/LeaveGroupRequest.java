@@ -29,6 +29,7 @@ import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.List;
 
+//请求主动退出消费组
 public class LeaveGroupRequest extends AbstractRequest {
 
     public static class Builder extends AbstractRequest.Builder<LeaveGroupRequest> {

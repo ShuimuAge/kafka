@@ -12,7 +12,10 @@ import java.util.Set;
 
 import static org.apache.kafka.common.config.ConfigDef.Range.atLeast;
 
-
+/**
+ * Didi-Kafka 灾备 1
+ * 镜像集群配置
+ */
 public class HAClusterConfig extends AbstractConfig {
 
     private static final ConfigDef CONFIG;
@@ -24,12 +27,12 @@ public class HAClusterConfig extends AbstractConfig {
     /**
      * <code>bootstrap.servers</code>
      */
-
     public static final String BOOTSTRAP_SERVERS_CONFIG = CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG;
 
     /**
      * <code>max.poll.records</code>
      */
+    //单次拉取的最大数据量
     public static final String MAX_POLL_RECORDS_CONFIG = "max.poll.records";
     private static final String MAX_POLL_RECORDS_DOC = "The maximum number of records returned in a single call to poll().";
 

@@ -209,12 +209,12 @@ class ControllerChannelManager(controllerContext: ControllerContext,
 case class QueueItem(apiKey: ApiKeys, request: AbstractControlRequest.Builder[_ <: AbstractControlRequest],
                      callback: AbstractResponse => Unit, enqueueTimeMs: Long)
 
-class RequestSendThread(val controllerId: Int,
-                        val controllerContext: ControllerContext,
-                        val queue: BlockingQueue[QueueItem],
-                        val networkClient: NetworkClient,
-                        val brokerNode: Node,
-                        val config: KafkaConfig,
+class RequestSendThread(val controllerId: Int,                      // Controller所在Broker的Id
+                        val controllerContext: ControllerContext,   // Controller元数据信息
+                        val queue: BlockingQueue[QueueItem],        // 请求阻塞队列
+                        val networkClient: NetworkClient,           // 用于执行发送的网络I/O类
+                        val brokerNode: Node,                       // 目标Broker节点
+                        val config: KafkaConfig,                    // Kafka配置信息
                         val time: Time,
                         val requestRateAndQueueTimeMetrics: Timer,
                         val stateChangeLogger: StateChangeLogger,
@@ -225,45 +225,66 @@ class RequestSendThread(val controllerId: Int,
 
   private val socketTimeoutMs = config.controllerSocketTimeoutMs
 
+  /**
+   * doWork 的逻辑很直观。它的主要作用是从阻塞队列中取出待发送的请求，
+   * 然后把它发送出去，之后等待 Response 的返回。在等待 Response 的过程中，
+   * 线程将一直处于阻塞状态。当接收到 Response 之后，
+   * 调用 callback 执行请求处理完成后的回调逻辑
+   */
   override def doWork(): Unit = {
 
     def backoff(): Unit = pause(100, TimeUnit.MILLISECONDS)
 
+    // 获取缓冲队列中的 QueueItem 对象，封装了请求类型、请求对象，以及响应回调函数
     val QueueItem(apiKey, requestBuilder, callback, enqueueTimeMs) = queue.take()
+    // 更新指标
     requestRateAndQueueTimeMetrics.update(time.milliseconds() - enqueueTimeMs, TimeUnit.MILLISECONDS)
 
     var clientResponse: ClientResponse = null
     try {
+      // 标识请求是否发送成功
       var isSendSuccessful = false
+      // 当 broker 节点宕机后，会触发 ZK 的监听器调用 removeBroker 方法停止当前线程，在停止前会一直尝试重试
       while (isRunning && !isSendSuccessful) {
         // if a broker goes down for a long time, then at some point the controller's zookeeper listener will trigger a
         // removeBroker which will invoke shutdown() on this thread. At that point, we will stop retrying.
         try {
+          // 如果没有创建与目标Broker的TCP连接，或连接暂时不可用
+          // 阻塞等待指定 broker 节点是否允许接收请求
           if (!brokerReady()) {
             isSendSuccessful = false
+            // 等待重试
             backoff()
           }
           else {
             val clientRequest = networkClient.newClientRequest(brokerNode.idString, requestBuilder,
               time.milliseconds(), true)
+            // 发送请求，等待接收Response
+            // sendAndReceive 方法在发送完请求之后，会原地进入阻塞状态，等待 Response 返回
             clientResponse = NetworkClientUtils.sendAndReceive(networkClient, clientRequest, time)
+            // 标记发送成功
             isSendSuccessful = true
           }
         } catch {
           case e: Throwable => // if the send was not successful, reconnect to broker and resend the message
             warn(s"Controller $controllerId epoch ${controllerContext.epoch} fails to send request $requestBuilder " +
               s"to broker $brokerNode. Reconnecting to broker.", e)
+            // 如果出现异常，关闭与对应Broker的连接
             networkClient.close(brokerNode.idString)
             isSendSuccessful = false
             backoff()
         }
       }
+      // 如果接收到了Response,解析响应
       if (clientResponse != null) {
         val requestHeader = clientResponse.requestHeader
+        // 解析请求类型
         val api = requestHeader.apiKey
+        // 此Response的请求类型必须是LeaderAndIsrRequest、StopReplicaRequest或UpdateMetadataRequest中的一种
         if (api != ApiKeys.LEADER_AND_ISR && api != ApiKeys.STOP_REPLICA && api != ApiKeys.UPDATE_METADATA)
           throw new KafkaException(s"Unexpected apiKey received: $apiKey")
 
+        // 执行响应回调函数
         val response = clientResponse.responseBody
 
         stateChangeLogger.withControllerEpoch(controllerContext.epoch).trace(s"Received response " +
@@ -271,6 +292,7 @@ class RequestSendThread(val controllerId: Int,
           s"${requestHeader.correlationId} sent to broker $brokerNode")
 
         if (callback != null) {
+          // 处理回调
           callback(response)
         }
       }
@@ -570,6 +592,7 @@ abstract class AbstractControllerBrokerRequestBatch(config: KafkaConfig,
     stopReplicaRequestMap.clear()
   }
 
+  //每当controller发生状态变更时，都会通过调用sendRequestsToBrokers方法发送leaderAndIsrRequest请求
   def sendRequestsToBrokers(controllerEpoch: Int): Unit = {
     try {
       val stateChangeLog = stateChangeLogger.withControllerEpoch(controllerEpoch)

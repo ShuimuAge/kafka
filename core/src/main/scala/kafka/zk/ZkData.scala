@@ -48,7 +48,7 @@ import scala.collection.{Map, Seq, mutable}
 import scala.util.{Failure, Success, Try}
 
 // This file contains objects for encoding/decoding data stored in ZooKeeper nodes (znodes).
-
+// 临时节点 controller（保存最新的 controller 节点信息，保证唯一性）
 object ControllerZNode {
   def path = "/controller"
   def encode(brokerId: Int, timestamp: Long): Array[Byte] = {
@@ -59,6 +59,7 @@ object ControllerZNode {
   }
 }
 
+// 永久节点 controller_epoch（保存最新 controller 对应的epoch号，用于避免脑裂）
 object ControllerEpochZNode {
   def path = "/controller_epoch"
   def encode(epoch: Int): Array[Byte] = epoch.toString.getBytes(UTF_8)
@@ -234,10 +235,12 @@ object BrokerIdZNode {
 }
 
 object TopicsZNode {
+  // /brokers/topics
   def path = s"${BrokersZNode.path}/topics"
 }
 
 object TopicZNode {
+  // "/brokers/topics/<topic>"
   def path(topic: String) = s"${TopicsZNode.path}/$topic"
   def encode(assignment: collection.Map[TopicPartition, ReplicaAssignment]): Array[Byte] = {
     val replicaAssignmentJson = mutable.Map[String, util.List[Int]]()
@@ -296,8 +299,13 @@ object TopicPartitionZNode {
   def path(partition: TopicPartition) = s"${TopicPartitionsZNode.path(partition.topic)}/${partition.partition}"
 }
 
+//用于操作保存于zk上的leader和isr信息
 object TopicPartitionStateZNode {
+  //先获取要更新的zookeeper节点路径:
+  //"/brokers/topics/<topic>/partition/<partition>/state"
   def path(partition: TopicPartition) = s"${TopicPartitionZNode.path(partition)}/state"
+  //组装新的json串,数据示例：
+  // {”controller_epoch”:26,”leader”:0,”version”:1, ”leader_epoch”:2,”isr”:[0,1]}
   def encode(leaderIsrAndControllerEpoch: LeaderIsrAndControllerEpoch): Array[Byte] = {
     val leaderAndIsr = leaderIsrAndControllerEpoch.leaderAndIsr
     val controllerEpoch = leaderIsrAndControllerEpoch.controllerEpoch
@@ -322,6 +330,7 @@ object ConfigEntityTypeZNode {
 }
 
 object ConfigEntityZNode {
+  // "/config/<entityType>/<entityName>"
   def path(entityType: String, entityName: String) = s"${ConfigEntityTypeZNode.path(entityType)}/$entityName"
   def encode(config: Properties): Array[Byte] = {
     Json.encodeAsBytes(Map("version" -> 1, "config" -> config).asJava)

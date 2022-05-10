@@ -31,6 +31,7 @@ import java.util.Set;
  * particular topic. There is one {@link ConsumerRecord} list for every topic
  * partition returned by a {@link Consumer#poll(java.time.Duration)} operation.
  */
+//消费者拉取到的消息的类型，表示一次poll操作所获得的消息集，内部包含了若干ConsumerRecord
 public class ConsumerRecords<K, V> implements Iterable<ConsumerRecord<K, V>> {
 
     @SuppressWarnings("unchecked")
@@ -47,6 +48,7 @@ public class ConsumerRecords<K, V> implements Iterable<ConsumerRecord<K, V>> {
      * 
      * @param partition The partition to get records for
      */
+    //获取消费集中指定分区的消息
     public List<ConsumerRecord<K, V>> records(TopicPartition partition) {
         List<ConsumerRecord<K, V>> recs = this.records.get(partition);
         if (recs == null)
@@ -73,6 +75,7 @@ public class ConsumerRecords<K, V> implements Iterable<ConsumerRecord<K, V>> {
      * Get the partitions which have records contained in this record set.
      * @return the set of partitions with data in this record set (may be empty if no data was returned)
      */
+    //获取消息集中的所有partition
     public Set<TopicPartition> partitions() {
         return Collections.unmodifiableSet(records.keySet());
     }
@@ -85,6 +88,7 @@ public class ConsumerRecords<K, V> implements Iterable<ConsumerRecord<K, V>> {
     /**
      * The number of records for all topics
      */
+    //返回消息集中的消息个数
     public int count() {
         int count = 0;
         for (List<ConsumerRecord<K, V>> recs: this.records.values())
@@ -119,11 +123,13 @@ public class ConsumerRecords<K, V> implements Iterable<ConsumerRecord<K, V>> {
         }
     }
 
+    //判断消息集是否为空
     public boolean isEmpty() {
         return records.isEmpty();
     }
 
     @SuppressWarnings("unchecked")
+    //返回空消息集
     public static <K, V> ConsumerRecords<K, V> empty() {
         return (ConsumerRecords<K, V>) EMPTY;
     }

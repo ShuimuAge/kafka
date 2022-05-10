@@ -10,8 +10,11 @@ import org.apache.kafka.common.utils.Time
 import scala.collection.{Set, mutable}
 
 /**
+ * TODO Didi-Kafka 灾备
  * @author leewei
  * @date 2021/9/28
+ *
+ * 管理MirrorFetcherThread及Topic同步任务
  */
 class MirrorFetcherManager(brokerConfig: KafkaConfig,
                            replicaManager: ReplicaManager,
@@ -53,18 +56,22 @@ class MirrorFetcherManager(brokerConfig: KafkaConfig,
     this.groupManagerOpt = Option(groupManager)
   }
 
+  /** 所有通过MirrorFetcherThread处理的partitions */
   def allFetchedPartitions(): Set[TopicPartition] = {
     fetcherThreadMap.values.flatMap(_.allPartitions()).toSet
   }
 
+  /** 所有通过MirrorFetcherThread延迟处理的partitions */
   def allDelayedPartitions(): Set[TopicPartition] = {
     fetcherThreadMap.values.flatMap(_.delayedPartitions()).toSet
   }
 
+  /** 所有fetch失败的partitions */
   def allFailedPartitions(): Set[TopicPartition] = {
     failedPartitions.listAll()
   }
 
+  /** 所有已通过MirrorFetcherThread处理的partitions */
   def allPartitions(): Set[TopicPartition] = {
     allFetchedPartitions() ++ allFailedPartitions()
   }

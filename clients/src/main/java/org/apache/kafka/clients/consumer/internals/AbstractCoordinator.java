@@ -111,10 +111,11 @@ import java.util.concurrent.atomic.AtomicReference;
 public abstract class AbstractCoordinator implements Closeable {
     public static final String HEARTBEAT_THREAD_PREFIX = "kafka-coordinator-heartbeat-thread";
 
+    //Coordinator的三种状态
     protected enum MemberState {
-        UNJOINED,    // the client is not part of a group
-        REBALANCING, // the client has begun rebalancing
-        STABLE,      // the client has joined and is sending heartbeats
+        UNJOINED,    // 表示未加入消费组 消费者的初始状态 the client is not part of a group
+        REBALANCING, // 正在进行rebalance 消费者向协调器发送加入组请求之前，状态变更为REBALANCING the client has begun rebalancing
+        STABLE,      // 消费者监听到消息成功返回，状态变更为STABLE，表示稳定状态，如果是失败的消息，状态重置为UNJOINED the client has joined and is sending heartbeats
     }
 
     private final Logger log;
@@ -189,6 +190,7 @@ public abstract class AbstractCoordinator implements Closeable {
      * @param allMemberMetadata Metadata from all members of the group
      * @return A map from each member to their state assignment
      */
+    //具体执行给所有消费者分配消费分区的方法
     protected abstract Map<String, ByteBuffer> performAssignment(String leaderId,
                                                                  String protocol,
                                                                  List<JoinGroupResponseData.JoinGroupResponseMember> allMemberMetadata);
@@ -202,6 +204,7 @@ public abstract class AbstractCoordinator implements Closeable {
      * @param protocol The protocol selected by the coordinator
      * @param memberAssignment The assignment propagated from the group leader
      */
+    // 执行分区的分配
     protected abstract void onJoinComplete(int generation,
                                            String memberId,
                                            String protocol,
@@ -222,7 +225,9 @@ public abstract class AbstractCoordinator implements Closeable {
      * @param timer Timer bounding how long this method can block
      * @return true If coordinator discovery and initial connection succeeded, false otherwise
      */
-    protected synchronized boolean ensureCoordinatorReady(final Timer timer) {
+    //确保coordinator准备好接收请求，若准备超时则返回false
+    protected synchronized boolean  ensureCoordinatorReady(final Timer timer) {
+        //如果groupCoordinator已经获取则直接返回
         if (!coordinatorUnknown())
             return true;
 
@@ -232,39 +237,51 @@ public abstract class AbstractCoordinator implements Closeable {
                 findCoordinatorException = null;
                 throw fatalException;
             }
+            //TODO-ssy 尝试向集群中负载最小的节点发送 FindCoordinatorRequest 请求
+            // 获取 GroupCoordinator,并建立连接
             final RequestFuture<Void> future = lookupCoordinator();
             client.poll(future, timer);
 
+            //如果还没回调完成则说明超时
             if (!future.isDone()) {
                 // ran out of time
                 break;
             }
 
+            // 如果获取的过程中失败了
             if (future.failed()) {
                 if (future.isRetriable()) {
                     log.debug("Coordinator discovery failed, refreshing metadata");
                     client.awaitMetadataUpdate(timer);
                 } else
                     throw future.exception();
-            } else if (coordinator != null && client.isUnavailable(coordinator)) {
+            }
+            //获取group的信息之后client会与group对应的节点建立连接，如果不可用则还会重试
+            else if (coordinator != null && client.isUnavailable(coordinator)) {
                 // we found the coordinator, but the connection has failed, so mark
                 // it dead and backoff before retrying discovery
+                // 当找到了 coordinator，但是连接失败了，此时标记为 dead，然后重试
                 markCoordinatorUnknown();
                 timer.sleep(rebalanceConfig.retryBackoffMs);
             }
+            //如果与group通信成功则会跳出循环
         } while (coordinatorUnknown() && timer.notExpired());
 
         return !coordinatorUnknown();
     }
 
+    // 获取 GroupCoordinator
+    //尝试向集群中负载最小的节点发送 FindCoordinatorRequest 请求
     protected synchronized RequestFuture<Void> lookupCoordinator() {
         if (findCoordinatorFuture == null) {
             // find a node to ask about the coordinator
+            // TODO-ssy 选择一个连接数最少的节点（视为最空闲）
             Node node = this.client.leastLoadedNode();
             if (node == null) {
                 log.debug("No broker available to send FindCoordinator request");
                 return RequestFuture.noBrokersAvailable();
             } else {
+                //发送 FindCoordinatorRequest 请求并获取响应
                 findCoordinatorFuture = sendFindCoordinatorRequest(node);
                 // remember the exception even after the future is cleared so that
                 // it can still be thrown by the ensureCoordinatorReady caller
@@ -347,17 +364,23 @@ public abstract class AbstractCoordinator implements Closeable {
      * @throws KafkaException if the callback throws exception
      * @return true iff the group is active
      */
+    //TODO 检查自己的group状态，若暂未与groupCoodinator联系则完成加入group的流程
     boolean ensureActiveGroup(final Timer timer) {
         // always ensure that the coordinator is ready because we may have been disconnected
         // when sending heartbeats and does not necessarily require us to rejoin the group.
+        // TODO 确保 GroupCoordinator 已经连接，防止之前建立的连接断开
+        //如果groupCoordinator已经获取则直接返回，否则发送findCoordinator请求并建立连接
         if (!ensureCoordinatorReady(timer)) {
             return false;
         }
 
+        //TODO-ssy 若还没有心跳进程则启动心跳发送线程（并不一定发送心跳,满足条件后才会发送心跳）
         startHeartbeatThreadIfNeeded();
+        //TODO-ssy 发送 JoinGroup 请求,并对返回的信息进行处理
         return joinGroupIfNeeded(timer);
     }
 
+    //检测心跳线程是否正常，若还没有心跳进程则初始化并开始心跳
     private synchronized void startHeartbeatThreadIfNeeded() {
         if (heartbeatThread == null) {
             heartbeatThread = new HeartbeatThread();
@@ -396,8 +419,11 @@ public abstract class AbstractCoordinator implements Closeable {
      * @throws KafkaException if the callback throws exception
      * @return true iff the operation succeeded
      */
+    //发送 JoinGroup + SyncGroup 请求并添加listener
     boolean joinGroupIfNeeded(final Timer timer) {
+        // 若需要加入组
         while (rejoinNeededOrPending()) {
+            // 获取GroupCoordinator
             if (!ensureCoordinatorReady(timer)) {
                 return false;
             }
@@ -407,6 +433,7 @@ public abstract class AbstractCoordinator implements Closeable {
             // on each iteration of the loop because an event requiring a rebalance (such as a metadata
             // refresh which changes the matched subscription set) can occur while another rebalance is
             // still in progress.
+            //触发 onJoinPrepare, 包括 offset commit 和 rebalance listener
             if (needsJoinPrepare) {
                 // need to set the flag before calling onJoinPrepare since the user callback may throw
                 // exception, in which case upon retry we should not retry onJoinPrepare either.
@@ -414,13 +441,17 @@ public abstract class AbstractCoordinator implements Closeable {
                 onJoinPrepare(generation.generationId, generation.memberId);
             }
 
+            /** 初始化 JoinGroup 请求,并发送该请求,添加listener */
+            // TODO-ssy 发送JGR和SGR请求
             final RequestFuture<ByteBuffer> future = initiateJoinGroup();
+            // TODO-ssy 阻塞等待JGR和SGR请求完成
             client.poll(future, timer);
             if (!future.isDone()) {
                 // we ran out of time
                 return false;
             }
 
+            /** 到这一步，时间上SyncGroup 已经成功了 */
             if (future.succeeded()) {
                 Generation generationSnapshot;
 
@@ -434,8 +465,10 @@ public abstract class AbstractCoordinator implements Closeable {
 
                 if (generationSnapshot != Generation.NO_GENERATION) {
                     // Duplicate the buffer in case `onJoinComplete` does not complete and needs to be retried.
+                    // 获取分区分配结果
                     ByteBuffer memberAssignment = future.value().duplicate();
 
+                    // 执行分区的分配
                     onJoinComplete(generationSnapshot.generationId, generationSnapshot.memberId, generationSnapshot.protocolName, memberAssignment);
 
                     // Generally speaking we should always resetJoinGroupFuture once the future is done, but here
@@ -447,6 +480,7 @@ public abstract class AbstractCoordinator implements Closeable {
                 } else {
                     log.info("Generation data was cleared by heartbeat thread. Initiating rejoin.");
                     resetStateAndRejoin();
+                    // 若失败，重置 joinFuture 为空,重新加入组
                     resetJoinGroupFuture();
                     return false;
                 }
@@ -477,6 +511,7 @@ public abstract class AbstractCoordinator implements Closeable {
         state = MemberState.UNJOINED;
     }
 
+    //发送JoinGroup请求，并添加listener
     private synchronized RequestFuture<ByteBuffer> initiateJoinGroup() {
         // we store the join future in case we are woken up by the user after beginning the
         // rebalance in the call to poll below. This ensures that we do not mistakenly attempt
@@ -485,13 +520,16 @@ public abstract class AbstractCoordinator implements Closeable {
             // fence off the heartbeat thread explicitly so that it cannot interfere with the join group.
             // Note that this must come after the call to onJoinPrepare since we must be able to continue
             // sending heartbeats if that callback takes some time.
+            /** rebalance 期间,心跳线程停止 */
             disableHeartbeatThread();
 
+            /** 状态标记为 rebalance */
             state = MemberState.REBALANCING;
             // a rebalance can be triggered consecutively if the previous one failed,
             // in this case we would not update the start time.
             if (lastRebalanceStartMs == -1L)
                 lastRebalanceStartMs = time.milliseconds();
+            /** TODO-ssy 发送 JoinGroup 请求 */
             joinFuture = sendJoinGroupRequest();
             joinFuture.addListener(new RequestFutureListener<ByteBuffer>() {
                 @Override
@@ -501,6 +539,7 @@ public abstract class AbstractCoordinator implements Closeable {
                     synchronized (AbstractCoordinator.this) {
                         if (generation != Generation.NO_GENERATION) {
                             log.info("Successfully joined group with generation {}", generation.generationId);
+                            /** 标记 Consumer 为 stable */
                             state = MemberState.STABLE;
                             rejoinNeeded = false;
                             // record rebalance latency
@@ -527,6 +566,7 @@ public abstract class AbstractCoordinator implements Closeable {
                 }
 
                 private void recordRebalanceFailure() {
+                    /** 标记 Consumer 为 Unjoined */
                     state = MemberState.UNJOINED;
                     sensors.failedRebalanceSensor.record();
                 }
@@ -544,12 +584,14 @@ public abstract class AbstractCoordinator implements Closeable {
      *
      * @return A request future which wraps the assignment returned from the group leader
      */
+    //发送 JoinGroup 请求并返回分配结果（在 JoinGroupResponseHandler中实现）
     RequestFuture<ByteBuffer> sendJoinGroupRequest() {
         if (coordinatorUnknown())
             return RequestFuture.coordinatorNotAvailable();
 
         // send a join group request to the coordinator
         log.info("(Re-)joining group");
+        //初始化JoinGroup请求
         JoinGroupRequest.Builder requestBuilder = new JoinGroupRequest.Builder(
                 new JoinGroupRequestData()
                         .setGroupId(rebalanceConfig.groupId)
@@ -567,14 +609,20 @@ public abstract class AbstractCoordinator implements Closeable {
         // maximum time that it may block on the coordinator. We add an extra 5 seconds for small delays.
 
         int joinGroupTimeoutMs = Math.max(rebalanceConfig.rebalanceTimeoutMs, rebalanceConfig.rebalanceTimeoutMs + 5000);
+        // TODO-ssy 发送JoinGroup请求并调用JoinGroupResponseHandler进行处理
         return client.send(coordinator, requestBuilder, joinGroupTimeoutMs)
                 .compose(new JoinGroupResponseHandler());
     }
 
+    //TODO-ssy 处理 JoinGroup response（同步 group 信息）
+    // 当消费者客户端发送 JoinGroupRequest 请求后（通过 AbstractCoordinator.sendJoinGroupRequest 方法），
+    // 会对返回的响应进行处理，具体的处理类是 JoinGroupResponseHandler.handle()
+    // 这里重点是调用 onJoinLeader 方法对 Leader 成员的处理和调用 onJoinFollower 方法对普通成员的处理
     private class JoinGroupResponseHandler extends CoordinatorResponseHandler<JoinGroupResponse, ByteBuffer> {
         @Override
         public void handle(JoinGroupResponse joinResponse, RequestFuture<ByteBuffer> future) {
             Errors error = joinResponse.error();
+            //TODO-ssy 如果正常返回，即响应中的 error 类型为 Erros.NONE
             if (error == Errors.NONE) {
                 if (isProtocolTypeInconsistent(joinResponse.data().protocolType())) {
                     log.debug("JoinGroup failed due to inconsistent Protocol Type, received {} but expected {}",
@@ -585,17 +633,23 @@ public abstract class AbstractCoordinator implements Closeable {
                     sensors.joinSensor.record(response.requestLatencyMs());
 
                     synchronized (AbstractCoordinator.this) {
+                        // 如果此时 Consumer 的状态不是 rebalacing 则抛出异常
                         if (state != MemberState.REBALANCING) {
                             // if the consumer was woken up before a rebalance completes, we may have already left
                             // the group. In this case, we do not want to continue with the sync group.
                             future.raise(new UnjoinedGroupException());
                         } else {
+                            //根据响应中的generationId、memberId和分区分配策略更新generation对象
                             AbstractCoordinator.this.generation = new Generation(
                                 joinResponse.data().generationId(),
                                 joinResponse.data().memberId(), joinResponse.data().protocolName());
+                            /** JoinGroup成功，下面需要进行SyncGroup，获取分配的主题分区 */
+                            //TODO-ssy 如果是Leader成员
                             if (joinResponse.isLeader()) {
                                 onJoinLeader(joinResponse).chain(future);
-                            } else {
+                            }
+                            //TODO-ssy 如果是普通成员
+                            else {
                                 onJoinFollower().chain(future);
                             }
                         }
@@ -655,8 +709,11 @@ public abstract class AbstractCoordinator implements Closeable {
         }
     }
 
+    //TODO-ssy 处理joinGroup请求的响应(当consumer为follower时)，发送SyncGroup获取分配结果
+    //对于普通member，只是封装syncGroup请求并向 GroupCoordinator 发送该请求
     private RequestFuture<ByteBuffer> onJoinFollower() {
         // send follower's sync group with an empty assignment
+        // 封装同步组的请求(分区分配方案 Assignments 为空)
         SyncGroupRequest.Builder requestBuilder =
                 new SyncGroupRequest.Builder(
                         new SyncGroupRequestData()
@@ -669,23 +726,30 @@ public abstract class AbstractCoordinator implements Closeable {
                                 .setAssignments(Collections.emptyList())
                 );
         log.debug("Sending follower SyncGroup to coordinator {} at generation {}: {}", this.coordinator, this.generation, requestBuilder);
+        //发送同步组请求
         return sendSyncGroupRequest(requestBuilder);
     }
 
+    //TODO-ssy 处理joinGroup请求的响应(当consumer为leader时)，对group下的所有实例进行分配，将assign的结果通过SyncGroup请求发送到GroupCoordinator
+    //根据返回的分区分配策略为所有消费者分配消费分区，然后向 GroupCoordinator 发送 SyncGroupRequest 同步组的请求
     private RequestFuture<ByteBuffer> onJoinLeader(JoinGroupResponse joinResponse) {
         try {
             // perform the leader synchronization and send back the assignment for the group
+            //TODO-ssy 执行leader成员对待消费partition的分配，返回结果中，key是memberId，value是该消费者分配的消费分区的序列化结果
             Map<String, ByteBuffer> groupAssignment = performAssignment(joinResponse.data().leader(), joinResponse.data().protocolName(),
                     joinResponse.data().members());
 
             List<SyncGroupRequestData.SyncGroupRequestAssignment> groupAssignmentList = new ArrayList<>();
+            //遍历各个消费者的消费分区分配方案
             for (Map.Entry<String, ByteBuffer> assignment : groupAssignment.entrySet()) {
+                //封装SyncGroupRequestData对象并加入groupAssignmentList集合
                 groupAssignmentList.add(new SyncGroupRequestData.SyncGroupRequestAssignment()
                         .setMemberId(assignment.getKey())
                         .setAssignment(Utils.toArray(assignment.getValue()))
                 );
             }
 
+            //封装同步组的请求
             SyncGroupRequest.Builder requestBuilder =
                     new SyncGroupRequest.Builder(
                             new SyncGroupRequestData()
@@ -698,12 +762,14 @@ public abstract class AbstractCoordinator implements Closeable {
                                     .setAssignments(groupAssignmentList)
                     );
             log.debug("Sending leader SyncGroup to coordinator {} at generation {}: {}", this.coordinator, this.generation, requestBuilder);
+            //发送同步组的请求
             return sendSyncGroupRequest(requestBuilder);
         } catch (RuntimeException e) {
             return RequestFuture.failure(e);
         }
     }
 
+    //发送syncGroup请求并用SyncGroupResponseHandler进行处理
     private RequestFuture<ByteBuffer> sendSyncGroupRequest(SyncGroupRequest.Builder requestBuilder) {
         if (coordinatorUnknown())
             return RequestFuture.coordinatorNotAvailable();
@@ -711,11 +777,13 @@ public abstract class AbstractCoordinator implements Closeable {
                 .compose(new SyncGroupResponseHandler());
     }
 
+    //处理groupCoordinator的syncGroup响应
     private class SyncGroupResponseHandler extends CoordinatorResponseHandler<SyncGroupResponse, ByteBuffer> {
         @Override
         public void handle(SyncGroupResponse syncResponse,
                            RequestFuture<ByteBuffer> future) {
             Errors error = syncResponse.error();
+            // 若同步成功
             if (error == Errors.NONE) {
                 if (isProtocolTypeInconsistent(syncResponse.data.protocolType())) {
                     log.debug("SyncGroup failed due to inconsistent Protocol Type, received {} but expected {}",
@@ -725,7 +793,9 @@ public abstract class AbstractCoordinator implements Closeable {
                     log.debug("SyncGroup failed due to inconsistent Protocol Name, received {} but expected {}",
                         syncResponse.data.protocolName(), generation().protocolName);
                     future.raise(Errors.INCONSISTENT_GROUP_PROTOCOL);
-                } else {
+                }
+                //若校验无异常：
+                else {
                     log.debug("Received successful SyncGroup response: {}", syncResponse);
                     sensors.syncSensor.record(response.requestLatencyMs());
                     future.complete(ByteBuffer.wrap(syncResponse.data.assignment()));
@@ -763,39 +833,50 @@ public abstract class AbstractCoordinator implements Closeable {
      * one of the brokers. The returned future should be polled to get the result of the request.
      * @return A request future which indicates the completion of the metadata request
      */
+    //发送FindCoordinator请求
     private RequestFuture<Void> sendFindCoordinatorRequest(Node node) {
         // initiate the group metadata request
         log.debug("Sending FindCoordinator request to broker {}", node);
+        // 初始化 FindCoordinator 请求
         FindCoordinatorRequest.Builder requestBuilder =
                 new FindCoordinatorRequest.Builder(
                         new FindCoordinatorRequestData()
                             .setKeyType(CoordinatorType.GROUP.id())
                             .setKey(this.rebalanceConfig.groupId));
+        // 发送请求并获取之后的响应结果，委派给 Handler 执行
         return client.send(node, requestBuilder)
                 .compose(new FindCoordinatorResponseHandler());
     }
 
+    //TODO-ssy 对发给 GroupCoordinator 的 FindCoordinator 请求的 response 进行回调处理
     private class FindCoordinatorResponseHandler extends RequestFutureAdapter<ClientResponse, Void> {
 
+        // 对成功的情况进行回调处理
         @Override
         public void onSuccess(ClientResponse resp, RequestFuture<Void> future) {
             log.debug("Received FindCoordinator response {}", resp);
             clearFindCoordinatorFuture();
 
+            //获取groupCoordinator返回的响应
             FindCoordinatorResponse findCoordinatorResponse = (FindCoordinatorResponse) resp.responseBody();
             Errors error = findCoordinatorResponse.error();
+            //若无报错
             if (error == Errors.NONE) {
                 synchronized (AbstractCoordinator.this) {
                     // use MAX_VALUE - node.id as the coordinator id to allow separate connections
                     // for the coordinator in the underlying network client layer
                     int coordinatorConnectionId = Integer.MAX_VALUE - findCoordinatorResponse.data().nodeId();
 
+                    /**如果正确获取 GroupCoordinator , 建立连接,并更新心跳时间**/
+                    // 设置GroupCoordinator所在的Node节点
                     AbstractCoordinator.this.coordinator = new Node(
                             coordinatorConnectionId,
                             findCoordinatorResponse.data().host(),
                             findCoordinatorResponse.data().port());
                     log.info("Discovered group coordinator {}", coordinator);
+                    // 与groupCoodinator建立 tcp 连接
                     client.tryConnect(coordinator);
+                    // 更新心跳时间
                     heartbeat.resetSessionTimeout();
                 }
                 future.complete(null);
@@ -818,6 +899,7 @@ public abstract class AbstractCoordinator implements Closeable {
      * Check if we know who the coordinator is and we have an active connection
      * @return true if the coordinator is unknown
      */
+    //是否需要查找GroupCoordinator
     public boolean coordinatorUnknown() {
         return checkAndGetCoordinator() == null;
     }
@@ -1360,6 +1442,9 @@ public abstract class AbstractCoordinator implements Closeable {
 
     }
 
+    //Kafka为Coordinator赋予了一个Generation的概念:
+    //初始值为-1，在第一次Rebalance后Group进入Stable状态时值为1，
+    // TODO-ssy 此后每发生一次Rebalance，Generation的Id会自增长加1。
     protected static class Generation {
         public static final Generation NO_GENERATION = new Generation(
                 OffsetCommitRequest.DEFAULT_GENERATION_ID,
@@ -1371,9 +1456,9 @@ public abstract class AbstractCoordinator implements Closeable {
         public final String protocolName;
 
         public Generation(int generationId, String memberId, String protocolName) {
-            this.generationId = generationId;
-            this.memberId = memberId;
-            this.protocolName = protocolName;
+            this.generationId = generationId;   //版本号
+            this.memberId = memberId;           //消费组成员Id
+            this.protocolName = protocolName;   //消费策略
         }
 
         /**

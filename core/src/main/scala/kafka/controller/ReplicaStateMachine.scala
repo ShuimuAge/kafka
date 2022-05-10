@@ -32,6 +32,10 @@ abstract class ReplicaStateMachine(controllerContext: ControllerContext) extends
   /**
    * Invoked on successful controller election.
    */
+
+  //启动副本状态机，初始化zk中所有副本的状态
+  //如果是online的副本则标记为OnlineReplica状态，否则标记为ReplicaDeletionIneligible
+  //生成LeaderAndIsrRequest请求并发送到对应brokerId
   def startup(): Unit = {
     info("Initializing replica state")
     initializeReplicaState()

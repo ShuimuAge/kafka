@@ -135,11 +135,13 @@ object Defaults {
   val MinInSyncReplicas = 1
   val MessageDownConversionEnable = true
 
+  /** Didi-Kafka 灾备 1 ↓ **/
   val DiDiHASyncTopicPartitionsEnabled = false
   val DiDiHASyncTopicConfigsEnabled = false
   val DiDiHASyncTopicAclsEnabled = false
   val DiDiMirrorStateTopicReplicationFactor = 3.toShort
   val DiDiMirrorStateTopicPartitions: Int = 50
+  /** Didi-Kafka 灾备 1 ↑ **/
   /** ********* Replication configuration ***********/
   val ControllerSocketTimeoutMs = RequestTimeoutMs
   val ControllerMessageQueueSize = Int.MaxValue
@@ -354,8 +356,10 @@ object KafkaConfig {
   val QueuedMaxBytesProp = "queued.max.request.bytes"
   val RequestTimeoutMsProp = CommonClientConfigs.REQUEST_TIMEOUT_MS_CONFIG
 
+  /*** Didi-Kafka 灾备 ↓ ***/
   val DiDiMirrorStateTopicReplicationFactorProp = "didi.mirror.state.topic.replication.factor"
   val DiDiMirrorStateTopicPartitionsProp = "didi.mirror.state.topic.num.partitions"
+  /*** Didi-Kafka 灾备 ↑ ***/
   /************* Authorizer Configuration ***********/
   val AuthorizerClassNameProp = "authorizer.class.name"
   /** ********* Socket Server Configuration ***********/
@@ -381,8 +385,10 @@ object KafkaConfig {
   val NumPartitionsProp = "num.partitions"
   val LogDirsProp = "log.dirs"
   val LogDirProp = "log.dir"
-  val LogSegmentBytesProp = "log.segment.bytes"
+  val LogSegmentBytesProp = "log.segment.bytes"                                       //当前日志段日志文件大小超过了log.segment.bytes配置的大小会触发日志分段切分，默认为1GB
 
+  //当前日志段中消息的最大时间戳与系统的时间戳差值超过了log.roll.ms配置的毫秒值或log.roll.hours配置的小时值时
+  //会触发日志分段切分, 若同时配置，优先级上log.roll.ms高，默认配置log.roll.hours为7天
   val LogRollTimeMillisProp = "log.roll.ms"
   val LogRollTimeHoursProp = "log.roll.hours"
 
@@ -407,8 +413,8 @@ object KafkaConfig {
   val LogCleanerDeleteRetentionMsProp = "log.cleaner.delete.retention.ms"
   val LogCleanerMinCompactionLagMsProp = "log.cleaner.min.compaction.lag.ms"
   val LogCleanerMaxCompactionLagMsProp = "log.cleaner.max.compaction.lag.ms"
-  val LogIndexSizeMaxBytesProp = "log.index.size.max.bytes"
-  val LogIndexIntervalBytesProp = "log.index.interval.bytes"
+  val LogIndexSizeMaxBytesProp = "log.index.size.max.bytes"                                                     //当前日志段中索引文件与时间戳索引文件超过了log.index.size.max.bytes配置的大小,会触发日志切分，默认为10MB
+  val LogIndexIntervalBytesProp = "log.index.interval.bytes"                                                    //它控制了日志段对象新增索引项的频率。每当写入这么多消息时，索引量和偏移量文件中分别新写入一个偏移量和时间戳索引项，默认4KB
   val LogFlushIntervalMessagesProp = "log.flush.interval.messages"
   val LogDeleteDelayMsProp = "log.segment.delete.delay.ms"
   val LogFlushSchedulerIntervalMsProp = "log.flush.scheduler.interval.ms"
@@ -429,16 +435,16 @@ object KafkaConfig {
   /** ********* Replication configuration ***********/
   val ControllerSocketTimeoutMsProp = "controller.socket.timeout.ms"
   val DefaultReplicationFactorProp = "default.replication.factor"
-  val ReplicaLagTimeMaxMsProp = "replica.lag.time.max.ms"
+  val ReplicaLagTimeMaxMsProp = "replica.lag.time.max.ms"                                                       //如果一个follower在这个时间内没有发送任何fetch请求或者在这个时间内没有追上leader当前的log end offset,那么将会从isr中移除
   val ReplicaSocketTimeoutMsProp = "replica.socket.timeout.ms"
   val ReplicaSocketReceiveBufferBytesProp = "replica.socket.receive.buffer.bytes"
   val ReplicaFetchMaxBytesProp = "replica.fetch.max.bytes"
-  val ReplicaFetchWaitMaxMsProp = "replica.fetch.wait.max.ms"
-  val ReplicaFetchMinBytesProp = "replica.fetch.min.bytes"
+  val ReplicaFetchWaitMaxMsProp = "replica.fetch.wait.max.ms"                                                   //对于follower replica而言，每个Fetch请求的最大等待时间，这个值应该比replica.lag.time.max.ms要小，否则对于那些吞吐量特别低的topic可能会导致isr频繁抖动
+  val ReplicaFetchMinBytesProp = "replica.fetch.min.bytes"                                                      //每次fetch请求最少拉取的数据量，如果不满足这个条件，那么要等待replicaMaxWaitTimeMs
   val ReplicaFetchResponseMaxBytesProp = "replica.fetch.response.max.bytes"
-  val ReplicaFetchBackoffMsProp = "replica.fetch.backoff.ms"
-  val NumReplicaFetchersProp = "num.replica.fetchers"
-  val ReplicaHighWatermarkCheckpointIntervalMsProp = "replica.high.watermark.checkpoint.interval.ms"
+  val ReplicaFetchBackoffMsProp = "replica.fetch.backoff.ms"                                                    //拉取时，如果遇到错误，下次拉取等待的时间
+  val NumReplicaFetchersProp = "num.replica.fetchers"                                                           //从一个broker同步数据的fetcher线程数，增加这个值时也会增加该broker的lo并行度(也就是说:从一台broker同步数据，最多能开这么大的线程数)
+  val ReplicaHighWatermarkCheckpointIntervalMsProp = "replica.high.watermark.checkpoint.interval.ms"            //hw刷到磁盘频率
   val FetchPurgatoryPurgeIntervalRequestsProp = "fetch.purgatory.purge.interval.requests"
   val ProducerPurgatoryPurgeIntervalRequestsProp = "producer.purgatory.purge.interval.requests"
   val DeleteRecordsPurgatoryPurgeIntervalRequestsProp = "delete.records.purgatory.purge.interval.requests"
@@ -1008,8 +1014,10 @@ object KafkaConfig {
       .define(BrokerIdGenerationEnableProp, BOOLEAN, Defaults.BrokerIdGenerationEnable, MEDIUM, BrokerIdGenerationEnableDoc)
       .define(MaxReservedBrokerIdProp, INT, Defaults.MaxReservedBrokerId, atLeast(0), MEDIUM, MaxReservedBrokerIdDoc)
       .define(BrokerIdProp, INT, Defaults.BrokerId, HIGH, BrokerIdDoc)
+      /*** Didi-Kafka 灾备 1 ↓ ***/
       .define(DiDiMirrorStateTopicReplicationFactorProp, SHORT, Defaults.DiDiMirrorStateTopicReplicationFactor, atLeast(1), HIGH, "")
       .define(DiDiMirrorStateTopicPartitionsProp, INT, Defaults.DiDiMirrorStateTopicPartitions, atLeast(1), HIGH, "")
+      /*** Didi-Kafka 灾备 1 ↑ ***/
       .define(MessageMaxBytesProp, INT, Defaults.MessageMaxBytes, atLeast(0), HIGH, MessageMaxBytesDoc)
       .define(NumNetworkThreadsProp, INT, Defaults.NumNetworkThreads, atLeast(1), HIGH, NumNetworkThreadsDoc)
       .define(NumIoThreadsProp, INT, Defaults.NumIoThreads, atLeast(1), HIGH, NumIoThreadsDoc)
@@ -1074,7 +1082,7 @@ object KafkaConfig {
       .define(LogCleanerMinCompactionLagMsProp, LONG, Defaults.LogCleanerMinCompactionLagMs, MEDIUM, LogCleanerMinCompactionLagMsDoc)
       .define(LogCleanerMaxCompactionLagMsProp, LONG, Defaults.LogCleanerMaxCompactionLagMs, MEDIUM, LogCleanerMaxCompactionLagMsDoc)
       .define(LogIndexSizeMaxBytesProp, INT, Defaults.LogIndexSizeMaxBytes, atLeast(4), MEDIUM, LogIndexSizeMaxBytesDoc)
-      .define(LogIndexIntervalBytesProp, INT, Defaults.LogIndexIntervalBytes, atLeast(0), MEDIUM, LogIndexIntervalBytesDoc)
+      .define(LogIndexIntervalBytesProp, INT, Defaults.LogIndexIntervalBytes, atLeast(0), MEDIUM, LogIndexIntervalBytesDoc)             //默认4K
       .define(LogFlushIntervalMessagesProp, LONG, Defaults.LogFlushIntervalMessages, atLeast(1), HIGH, LogFlushIntervalMessagesDoc)
       .define(LogDeleteDelayMsProp, LONG, Defaults.LogDeleteDelayMs, atLeast(0), HIGH, LogDeleteDelayMsDoc)
       .define(LogFlushSchedulerIntervalMsProp, LONG, Defaults.LogFlushSchedulerIntervalMs, HIGH, LogFlushSchedulerIntervalMsDoc)
@@ -1418,10 +1426,13 @@ class KafkaConfig(val props: java.util.Map[_, _], doLog: Boolean, dynamicConfigO
   /** ********* General Configuration ***********/
   val brokerIdGenerationEnable: Boolean = getBoolean(KafkaConfig.BrokerIdGenerationEnableProp)
   val maxReservedBrokerId: Int = getInt(KafkaConfig.MaxReservedBrokerIdProp)
+  //本kafka server的broker id
   var brokerId: Int = getInt(KafkaConfig.BrokerIdProp)
 
-  val mirrorStateTopicReplicationFactor = getShort(KafkaConfig.DiDiMirrorStateTopicReplicationFactorProp)
-  val mirrorStateTopicPartitions = getInt (KafkaConfig.DiDiMirrorStateTopicPartitionsProp)
+  /*** Didi-Kafka 灾备 1 ↓ ***/
+  val mirrorStateTopicReplicationFactor = getShort(KafkaConfig.DiDiMirrorStateTopicReplicationFactorProp)   //主题 __mirror_state 配置的副本数
+  val mirrorStateTopicPartitions = getInt(KafkaConfig.DiDiMirrorStateTopicPartitionsProp)                   //主题 __mirror_state 配置的分区数
+  /*** Didi-Kafka 灾备 1 ↑ ***/
 
   def numNetworkThreads = getInt(KafkaConfig.NumNetworkThreadsProp)
   def backgroundThreads = getInt(KafkaConfig.BackgroundThreadsProp)
@@ -1439,20 +1450,6 @@ class KafkaConfig(val props: java.util.Map[_, _], doLog: Boolean, dynamicConfigO
   var sessionReportTimeMs: Int = getInt(KafkaConfig.SessionReportTimeMsProp)
   var kafkaExMetricsEnableAll: Boolean = getBoolean(KafkaConfig.KafkaExMetricsEnableAllProp)
   var maxThrottleTimeMs: Int = getInt(KafkaConfig.MaxThrottleTimeMsProp)
-
-  val mirrorStateTopicReplicationFactor = getShort(KafkaConfig.DiDiMirrorStateTopicReplicationFactorProp)
-  val mirrorStateTopicPartitions = getInt(KafkaConfig.DiDiMirrorStateTopicPartitionsProp)
-  val mirrorSyncPartitionsIntervalMs = getLong(KafkaConfig.DiDiMirrorSyncPartitionsIntervalMsProp)
-  val mirrorSyncAclConfigsIntervalMs = getLong(KafkaConfig.DiDiMirrorSyncAclConfigsIntervalMsProp)
-  val mirrorNumFetchers = getInt(KafkaConfig.DiDiMirrorNumFetchersProp)
-
-  def numNetworkThreads = getInt(KafkaConfig.NumNetworkThreadsProp)
-  def backgroundThreads = getInt(KafkaConfig.BackgroundThreadsProp)
-  val queuedMaxRequests = getInt(KafkaConfig.QueuedMaxRequestsProp)
-  val queuedMaxBytes = getLong(KafkaConfig.QueuedMaxBytesProp)
-  def numIoThreads = getInt(KafkaConfig.NumIoThreadsProp)
-  def messageMaxBytes = getInt(KafkaConfig.MessageMaxBytesProp)
-  val requestTimeoutMs = getInt(KafkaConfig.RequestTimeoutMsProp)
 
   def getNumReplicaAlterLogDirsThreads: Int = {
     val numThreads: Integer = Option(getInt(KafkaConfig.NumReplicaAlterLogDirsThreadsProp)).getOrElse(logDirs.size)

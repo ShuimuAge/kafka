@@ -57,6 +57,9 @@ public class PartitionStates<S> {
             map.put(topicPartition, state);
     }
 
+    //把给定的分区从LinkedHashMap的头部移除，然后放到尾部，从而达到轮询的目的:
+    //LinkedHashMap对于插入元素是有顺序的，假如插入顺序是abcde，先读取了a，
+    // 为了保证公平性，会将a从集合中先移除，然后放到尾部，那么下次就从b开始读
     public void updateAndMoveToEnd(TopicPartition topicPartition, S state) {
         map.remove(topicPartition);
         map.put(topicPartition, state);
